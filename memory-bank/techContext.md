@@ -16,7 +16,7 @@
 
 **External Dependencies (Command Line Tools):**
 *   `ffmpeg`: **Required** for audio normalization and video audio extraction.
-*   `demucs` (command-line): **Implicitly required** if `demucs` Python package is used for vocal separation.
+*   `demucs` (command-line): **Implicitly required** if `demucs` Python package is used for vocal separation. **Uses `--segment` and `--overlap` internally for large file processing.**
 
 **Development Setup:**
 *   Python environment with libraries installed from `requirements.txt`.
@@ -39,4 +39,5 @@
     *   `--auto_speakers`: Toggle automatic speaker count detection (default: off).
     *   `--enable_vocal_separation`: Toggle Demucs vocal separation (default: off).
 *   **Speaker Labels:** Output format is `S0`, `S1`, etc.
-*   Some internal parameters in `whisperBite.py` are hardcoded (LUFS target, segment merge gap, word padding, second pass thresholds, sound detection regex). 
+*   Some internal parameters in `whisperBite.py` are hardcoded (LUFS target, segment merge gap, word padding, second pass thresholds, sound detection regex).
+*   **Demucs parameters in `vocal_separation.py` are set (`--segment 600`, `--overlap 0.1`).** 

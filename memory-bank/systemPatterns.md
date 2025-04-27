@@ -28,11 +28,11 @@
     *   `format_speaker_label()`: Converts raw speaker labels (e.g., `SPEAKER_00`) to concise format (`S0`). Used during slicing and refinement.
     *   Other helpers (`normalize_audio`, `slice_audio_by_speaker`, etc.).
 *   `vocal_separation.py`:
-    *   `separate_vocals_with_demucs()`: Runs Demucs, **returns paths to both `vocals.wav` and `no_vocals.wav` (if found).**
+    *   `separate_vocals_with_demucs()`: Runs Demucs using `subprocess`. **Now uses `--segment 600` and `--overlap 0.1` to handle large files and potentially improve quality by processing in chunks.** Returns paths to both `vocals.wav` and `no_vocals.wav` (if found).
 *   `utils.py`, `vocal_separation.py`: Helpers.
 
 **Processing Flow (Simplified):**
-Input -> `app.py` -> `process_audio` -> Video Check/Extract -> Normalize -> [Optional Vocal Separation -> Store `vocals` & `no_vocals` paths -> Update main audio path to `vocals`] -> Diarize (`pyannote` on `vocals` or normalized audio) -> Slice audio (using formatted `S0` labels) -> Transcribe slices (`whisper`) -> [Optional Sound Detection -> Transcribe `no_vocals` -> Filter for tags -> Create `SOUND` segments] -> [Optional 2nd Pass -> Refine long segments -> Return refined segments] -> Merge (1st pass or [Unrefined 1st + Refined 2nd]) + Sounds -> Sort chronologically -> Write Master Transcript -> Zip -> Cleanup.
+Input -> `app.py` -> `process_audio` -> Video Check/Extract -> Normalize -> [Optional Vocal Separation -> **Demucs runs with chunking (`--segment`, `--overlap`)** -> Store `vocals` & `no_vocals` paths -> Update main audio path to `vocals`] -> Diarize (`pyannote` on `vocals` or normalized audio) -> Slice audio (using formatted `S0` labels) -> Transcribe slices (`whisper`) -> [Optional Sound Detection -> Transcribe `no_vocals` -> Filter for tags -> Create `SOUND` segments] -> [Optional 2nd Pass -> Refine long segments -> Return refined segments] -> Merge (1st pass or [Unrefined 1st + Refined 2nd]) + Sounds -> Sort chronologically -> Write Master Transcript -> Zip -> Cleanup.
 
 **Data Management:**
 *   Timestamped output directory per input file.

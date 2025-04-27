@@ -17,6 +17,7 @@
 *   Correct Demucs execution (using `-n` flag).
 *   Speaker labels formatted as `S0`, `S1`, etc.
 *   Master transcript generation attempts merging first/second pass and sound events.
+*   **Vocal separation (`demucs`): Now uses internal chunking (`--segment`, `--overlap`) to handle large files.**
 
 **What Needs Work/Verification:**
 *   **Master transcript merging:** Ensure second pass correctly replaces, not duplicates, original segments (User noted potential remaining issue). Requires reviewing debug logs added.
@@ -29,6 +30,7 @@
 *   Dependency checking (ffmpeg/demucs availability).
 *   Cleanup of temporary directories created by `app.py` for Gradio downloads.
 *   Packaging for deployment (e.g., Pinokio).
+*   **Demucs chunking parameters (`--segment`, `--overlap`) might need tuning based on performance and quality testing.**
 
 **Current Status:** Core features refined, including Demucs integration, speaker formatting, defaults, and sound detection (basic). Master transcript merging needs verification.
 

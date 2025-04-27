@@ -25,8 +25,10 @@
     *   Set default to `False` in UI (`app.py`) and backend (`process_audio`).
 *   Updated `README.md` with new features and notes.
 *   Added detailed logging for transcript merging to aid debugging potential duplication issues.
+*   **Added `--segment 600` and `--overlap 0.1` flags to the Demucs command in `vocal_separation.py` to enable internal chunking for large files, preventing potential memory errors.**
 
 **Next Steps / Potential Issues:**
+*   **Test Demucs chunking:** Verify that the `--segment` and `--overlap` flags work correctly for large files (>1 hour) and that the output quality is acceptable, especially at chunk boundaries. Adjust values if necessary.
 *   Verify the master transcript merging logic thoroughly to ensure duplicates are correctly eliminated when the second pass is used. (Initial user feedback suggests this might still need work). Logs were added to help diagnose.
 *   Evaluate the effectiveness of sound detection using Whisper on the `no_vocals` track. Consider alternative methods (e.g., dedicated SED models like YAMNet) if Whisper is insufficient.
 *   Test phone ringing detection specifically.
