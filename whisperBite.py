@@ -12,6 +12,7 @@ from pydub import AudioSegment
 from utils import sanitize_filename, download_audio, zip_results
 from vocal_separation import separate_vocals_with_demucs
 import re
+from sound_detection import detect_sound_events
 
 # Configure logging
 logging.basicConfig(
@@ -604,6 +605,17 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
     os.makedirs(final_output_dir, exist_ok=True)
     logging.info(f"Output directory set to: {final_output_dir}")
 
+    # --- Setup File Logging --- 
+    log_file_path = os.path.join(final_output_dir, 'processing.log')
+    file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+    log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s") # Use the same format
+    file_handler.setFormatter(log_formatter)
+    
+    root_logger = logging.getLogger() # Get the root logger
+    root_logger.addHandler(file_handler)
+    logging.info(f"File logging started. Log file: {log_file_path}")
+    # --- End File Logging Setup --- 
+
     audio_to_process = None
     try:
         # --- Check if input is video and extract audio --- 
@@ -686,36 +698,23 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
         first_pass_segments = transcribe_with_whisper(model, segment_info_dict, final_output_dir, enable_word_extraction=enable_word_extraction)
         logging.info("Transcription complete")
 
-        # --- Attempt Sound Detection on Non-Vocal Track --- 
-        sound_event_segments = []
+        # --- Attempt Sound Detection using YAMNet on Non-Vocal Track --- 
+        sound_event_segments = [] # Initialize the list for sound events
         if enable_vocal_separation and attempt_sound_detection and no_vocals_path:
-            logging.info(f"Attempting sound detection on non-vocal track: {no_vocals_path}")
+            logging.info(f"Attempting sound detection with YAMNet on non-vocal track: {no_vocals_path}")
             try:
-                # Use the same Whisper model for now
-                no_vocals_transcription = model.transcribe(no_vocals_path, word_timestamps=True) # Get segments
-                
-                # Regex to find segments that ONLY contain bracketed tags
-                bracket_pattern = re.compile(r"^\[\s*.*\s*\]$|\(.*\)|♪.*♪") # Match [.*], (.*), or ♪.*♪
-                
-                if 'segments' in no_vocals_transcription:
-                    for segment in no_vocals_transcription['segments']:
-                        text = segment['text'].strip()
-                        # Check if the entire segment text matches the bracket pattern
-                        if text and bracket_pattern.fullmatch(text):
-                            logging.info(f"  [Sound Detect] Found potential sound event: {text} at {segment['start']:.2f}s - {segment['end']:.2f}s")
-                            sound_event_segments.append({
-                                'speaker': 'SOUND', # Special label for sound events
-                                'start': segment['start'],
-                                'end': segment['end'],
-                                'text': text, # Keep the detected tag
-                                'audio_file': None, # No specific audio file for sound event
-                                'transcript_file': None,
-                                'sequence': -1 # Indicate it's not a regular sequence
-                            })
-                logging.info(f"Sound detection finished. Found {len(sound_event_segments)} potential sound events.")
+                # Call the new function from sound_detection.py
+                sound_event_segments = detect_sound_events(no_vocals_path)
+                logging.info(f"YAMNet sound detection finished. Found {len(sound_event_segments)} potential sound events.")
             except Exception as sound_err:
-                logging.error(f"Error during sound detection on {no_vocals_path}: {sound_err}")
+                # Catch errors specifically from our sound detection function call
+                logging.error(f"Error during YAMNet sound detection process for {no_vocals_path}: {sound_err}")
+                # Optionally log traceback if needed for debugging
+                # import traceback
+                # logging.error(traceback.format_exc())
+                sound_event_segments = [] # Ensure it's empty on error
         else:
+            # Log reasons for skipping (as before)
             if not enable_vocal_separation:
                 logging.info("Skipping sound detection: Vocal separation not enabled.")
             elif not attempt_sound_detection:
@@ -850,6 +849,13 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
                 os.remove(extracted_audio_temp_file)
             except OSError as e:
                 logging.warning(f"Could not remove temporary audio file {extracted_audio_temp_file}: {e}")
+        
+        # --- Clean up File Logging --- 
+        if file_handler:
+            logging.info("Stopping file logging.")
+            root_logger.removeHandler(file_handler)
+            file_handler.close()
+        # --- End File Logging Cleanup ---
 
 def copy_final_outputs(temp_dir, final_output_dir):
     """Copy only the final output files to the final output directory."""

@@ -25,10 +25,20 @@
     *   Set default to `False` in UI (`app.py`) and backend (`process_audio`).
 *   Updated `README.md` with new features and notes.
 *   Added detailed logging for transcript merging to aid debugging potential duplication issues.
-*   **Added `--segment 600` and `--overlap 0.1` flags to the Demucs command in `vocal_separation.py` to enable internal chunking for large files, preventing potential memory errors.**
+*   Added `--segment` and `--overlap` flags to the Demucs command in `vocal_separation.py` to enable internal chunking for large files, preventing potential memory errors. **Values adjusted to `--segment 7` (due to htdemucs limit) and `--overlap 0.25` (default).**
+*   Created `sound_detection.py` with YAMNet integration:
+    *   **Added new dependencies (`tensorflow`, `tensorflow_hub`, `librosa`).**
+    *   **Implemented `detect_sound_events` function using YAMNet model from TF Hub.**
+    *   **Targets specific sound classes (phone ringing, dial tone etc.) based on a threshold.**
+    *   **Includes basic segment merging for consecutive detections.**
+*   **Modified `process_audio` in `whisperBite.py`:**
+    *   **Imports and calls `detect_sound_events` for the `no_vocals` track (if available/enabled).**
+    *   **Replaced previous regex-based sound detection.**
 
 **Next Steps / Potential Issues:**
-*   **Test Demucs chunking:** Verify that the `--segment` and `--overlap` flags work correctly for large files (>1 hour) and that the output quality is acceptable, especially at chunk boundaries. Adjust values if necessary.
+*   **Refine YAMNet Class Map Loading:** The current hardcoded dictionary in `sound_detection.py` should be replaced with loading the actual `yamnet_class_map.csv` file (either fetch from TF Hub cache or include in repo).
+*   **Test YAMNet Sound Detection:** Thoroughly test with audio containing target sounds (phone ringing, dial tones) and other noises to evaluate accuracy, adjust threshold, and refine segment merging if needed.
+*   Test Demucs chunking: Verify that the `--segment 7` and `--overlap 0.25` flags work correctly for large files (>1 hour) and that the output quality is acceptable, especially at chunk boundaries. Adjust values if necessary.
 *   Verify the master transcript merging logic thoroughly to ensure duplicates are correctly eliminated when the second pass is used. (Initial user feedback suggests this might still need work). Logs were added to help diagnose.
 *   Evaluate the effectiveness of sound detection using Whisper on the `no_vocals` track. Consider alternative methods (e.g., dedicated SED models like YAMNet) if Whisper is insufficient.
 *   Test phone ringing detection specifically.

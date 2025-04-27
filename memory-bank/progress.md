@@ -20,6 +20,10 @@
 *   **Vocal separation (`demucs`): Now uses internal chunking (`--segment`, `--overlap`) to handle large files.**
 
 **What Needs Work/Verification:**
+*   **YAMNet Sound Detection:** 
+    *   **Reliability of class map loading.**
+    *   **Accuracy and threshold tuning for target sounds (phone etc.).**
+    *   **Effectiveness of segment merging logic.**
 *   **Master transcript merging:** Ensure second pass correctly replaces, not duplicates, original segments (User noted potential remaining issue). Requires reviewing debug logs added.
 *   **Sound Detection Accuracy:** Evaluate Whisper's effectiveness on `no_vocals` track, especially for specific sounds like phone ringing. Consider dedicated SED models if needed.
 *   Robustness of `detect_optimal_speakers` heuristic (if enabled).
@@ -32,9 +36,17 @@
 *   Packaging for deployment (e.g., Pinokio).
 *   **Demucs chunking parameters (`--segment`, `--overlap`) might need tuning based on performance and quality testing.**
 
-**Current Status:** Core features refined, including Demucs integration, speaker formatting, defaults, and sound detection (basic). Master transcript merging needs verification.
+**Current Status:** Core features refined, including Demucs integration, speaker formatting, defaults, and sound detection (basic). **Initial YAMNet sound detection implemented.** Master transcript merging and sound detection require testing and verification.
 
 **Known Issues:**
+*   **YAMNet class map loading uses a temporary hardcoded dictionary.**
+*   Potential duplication in master transcript when second pass is used (needs log verification).
+*   Sound detection accuracy is dependent on Whisper model and may not be reliable for specific sounds like ringing.
+*   Folder input only processes the newest compatible file.
+*   Potential filename parsing errors in `transcribe_with_whisper` (fallback exists).
+*   Demucs check is basic. 
+*   **All logs, including subprocess stderr, are now also written to `processing.log` within the run's output directory.**
+*   YAMNet class map loading uses a temporary hardcoded dictionary.
 *   Potential duplication in master transcript when second pass is used (needs log verification).
 *   Sound detection accuracy is dependent on Whisper model and may not be reliable for specific sounds like ringing.
 *   Folder input only processes the newest compatible file.

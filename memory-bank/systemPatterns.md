@@ -17,11 +17,12 @@
         *   Calls normalization, optional vocal separation, diarization, slicing.
         *   Calls `transcribe_with_whisper`.
         *   Conditionally calls `run_second_pass_diarization`.
-        *   Conditionally transcribes non-vocal track for sound detection.
-        *   Merges speech and sound segments.
+        *   **Conditionally calls `sound_detection.detect_sound_events` on the `no_vocals` track (if available and enabled) using YAMNet.**
+        *   Merges speech (1st pass or refined 2nd pass) and sound segments.
         *   Writes final master transcript.
         *   Calls `zip_results`.
         *   **Cleans up temporary extracted WAV in `finally` block.**
+        *   **Sets up and tears down a `FileHandler` for run-specific logging to `processing.log` within the output directory.**
     *   `extract_audio_from_video()`: Uses `ffmpeg` via `subprocess` to extract audio.
     *   `transcribe_with_whisper()`: Handles transcription, conditional word extraction. Returns list of first-pass segments.
     *   `run_second_pass_diarization()`: Implements refinement pass. Iterates first-pass segments, runs diarization, checks for overlap. If found, re-slices audio, transcribes sub-segments, saves refined audio/text files using content-based naming, and **returns a list of refined segments.**
@@ -29,10 +30,12 @@
     *   Other helpers (`normalize_audio`, `slice_audio_by_speaker`, etc.).
 *   `vocal_separation.py`:
     *   `separate_vocals_with_demucs()`: Runs Demucs using `subprocess`. **Now uses `--segment 600` and `--overlap 0.1` to handle large files and potentially improve quality by processing in chunks.** Returns paths to both `vocals.wav` and `no_vocals.wav` (if found).
-*   `utils.py`, `vocal_separation.py`: Helpers.
+*   **`sound_detection.py`:**
+    *   **`detect_sound_events()`: Loads YAMNet model, processes `no_vocals.wav` in chunks, runs inference, filters for target sound classes (e.g., phone ringing) above a threshold, merges consecutive detections, and returns a list of sound event segments.**
+*   `utils.py`: Helpers.
 
 **Processing Flow (Simplified):**
-Input -> `app.py` -> `process_audio` -> Video Check/Extract -> Normalize -> [Optional Vocal Separation -> **Demucs runs with chunking (`--segment`, `--overlap`)** -> Store `vocals` & `no_vocals` paths -> Update main audio path to `vocals`] -> Diarize (`pyannote` on `vocals` or normalized audio) -> Slice audio (using formatted `S0` labels) -> Transcribe slices (`whisper`) -> [Optional Sound Detection -> Transcribe `no_vocals` -> Filter for tags -> Create `SOUND` segments] -> [Optional 2nd Pass -> Refine long segments -> Return refined segments] -> Merge (1st pass or [Unrefined 1st + Refined 2nd]) + Sounds -> Sort chronologically -> Write Master Transcript -> Zip -> Cleanup.
+Input -> `app.py` -> `process_audio` -> Video Check/Extract -> Normalize -> [Optional Vocal Separation -> Demucs runs with chunking (`--segment`, `--overlap`) -> Store `vocals` & `no_vocals` paths -> Update main audio path to `vocals`] -> Diarize (`pyannote` on `vocals` or normalized audio) -> Slice audio (using formatted `S0` labels) -> Transcribe slices (`whisper`) -> **[Optional Sound Detection -> Call `detect_sound_events` on `no_vocals` -> Get `SOUND` segments]** -> [Optional 2nd Pass -> Refine long segments -> Return refined segments] -> Merge (1st pass or [Unrefined 1st + Refined 2nd]) + Sounds -> Sort chronologically -> Write Master Transcript -> Zip -> Cleanup.
 
 **Data Management:**
 *   Timestamped output directory per input file.
@@ -41,7 +44,7 @@ Input -> `app.py` -> `process_audio` -> Video Check/Extract -> Normalize -> [Opt
 *   Conditional `_words` dirs and `word_timings.json`.
 *   Conditional `2nd_pass` subdirectory containing refined audio and transcripts.
 *   `app.py` handles zip download via Gradio temp mechanism.
-*   **`zip_results` creates archive containing the full output structure (including `2nd_pass`), excluding intermediate `normalized` and `downloads` folders.**
+*   **`zip_results` creates archive containing the full output structure (including `2nd_pass`, `processing.log`), excluding intermediate `normalized` and `downloads` folders.**
 
 **Error Handling:**
 *   `extract_audio_from_video` checks for `ffmpeg` errors.
