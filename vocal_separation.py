@@ -44,6 +44,8 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
                 "--two-stems", "vocals",
                 "--out", temp_dir,
                 "-n", model,
+                "--segment", "600",
+                "--overlap", "0.1",
                 input_audio
             ]
             
