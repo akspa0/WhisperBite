@@ -5,4 +5,12 @@ torch # Note: Specific version might be needed depending on CUDA setup and other
 torchaudio
 pydub
 demucs # For optional vocal separation
-yt-dlp # For URL downloading 
+yt-dlp # For URL downloading
+
+# Dependencies for Sound Event Detection (CLAP) & Whisper/Pyannote Backends
+transformers # For CLAP model
+librosa # Handles audio loading/resampling for CLAP and others
+# soundfile - Usually installed as a dependency by librosa/torch
+
+# YAML Output
+PyYAML 

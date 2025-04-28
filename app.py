@@ -15,8 +15,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 def run_pipeline(input_file, input_folder, url, output_folder, model, num_speakers, 
                 auto_speakers, enable_vocal_separation, 
                 enable_word_extraction, enable_second_pass, 
+                second_pass_min_duration,
                 attempt_sound_detection,
-                hf_token):
+                hf_token,
+                split_stereo,
+                clap_chunk_duration,
+                clap_threshold,
+                clap_target_prompts,
+                force_mono_output):
     """Run the audio processing pipeline based on user inputs."""
     logging.info("Starting pipeline run...")
     # Set Hugging Face token if provided
@@ -72,7 +78,7 @@ def run_pipeline(input_file, input_folder, url, output_folder, model, num_speake
 
     # Run the processing pipeline
     try:
-        logging.info(f"Calling process_audio with options: model={model}, num_speakers={num_speakers}, auto={auto_speakers}, separation={enable_vocal_separation}, words={enable_word_extraction}, second_pass={enable_second_pass}, sound_detect={attempt_sound_detection}")
+        logging.info(f"Calling process_audio with options: model={model}, num_speakers={num_speakers}, auto={auto_speakers}, separation={enable_vocal_separation}, words={enable_word_extraction}, second_pass={enable_second_pass}, sound_detect={attempt_sound_detection}, split_stereo={split_stereo}, clap_chunk={clap_chunk_duration}, clap_thresh={clap_threshold}, force_mono={force_mono_output}")
         # Pass the new arguments
         result_dir = process_audio(
             input_path=input_path,
@@ -83,7 +89,14 @@ def run_pipeline(input_file, input_folder, url, output_folder, model, num_speake
             auto_speakers=auto_speakers,
             enable_word_extraction=enable_word_extraction,
             enable_second_pass=enable_second_pass,
-            attempt_sound_detection=attempt_sound_detection
+            second_pass_min_duration=second_pass_min_duration,
+            attempt_sound_detection=attempt_sound_detection,
+            split_stereo=split_stereo,
+            clap_chunk_duration=clap_chunk_duration,
+            clap_threshold=clap_threshold,
+            clap_target_prompts=clap_target_prompts,
+            force_mono_output=force_mono_output,
+            input_url=url if source_type == "URL" else None
         )
 
         if not result_dir or not os.path.isdir(result_dir):
@@ -232,14 +245,14 @@ def build_interface():
                         maximum=10, 
                         step=1, 
                         value=2,
-                        info="Set expected number of speakers"
+                        info="Set expected number of speakers. Diarization uses Pyannote (requires HF token)."
                     )
                 
                 with gr.Row():
                     auto_speakers = gr.Checkbox(
                         label="Auto-detect Speaker Count", 
                         value=False,
-                        info="Automatically determine optimal speaker count"
+                        info="Automatically determine optimal speaker count (uses Pyannote, requires HF token)."
                     )
                     
                     enable_vocal_separation = gr.Checkbox(
@@ -248,33 +261,82 @@ def build_interface():
                         info="Isolate voices from background noise/music (requires Demucs)"
                     )
                 
-                # Add new options here
+                with gr.Row():
+                    split_stereo = gr.Checkbox(
+                        label="Split Stereo Channels (if stereo input)",
+                        value=False,
+                        info="Process Left and Right channels separately (useful for dual-mono recordings)"
+                    )
+                    force_mono_output = gr.Checkbox(
+                        label="Force Mono Output Snippets",
+                        value=False,
+                        info="Convert all output speaker/word audio files to mono."
+                    )
+                
                 with gr.Row():
                     enable_word_extraction = gr.Checkbox(
                         label="Enable Word Audio Extraction", 
                         value=False,
-                        info="Extract individual audio files for each word (can create many files)"
+                        info="Extract individual word audio snippets (generates many files)"
                     )
+                    
                     enable_second_pass = gr.Checkbox(
                         label="Enable Second Pass Refinement", 
-                        value=False, 
-                        info="Re-analyze initial segments to improve speaker separation (experimental)"
+                        value=False,
+                        info="Perform extra analysis to refine speaker separation (experimental)"
                     )
-                
-                # Add Sound Detection Checkbox (conditionally visible/interactive)
-                attempt_sound_detection = gr.Checkbox(
-                    label="Attempt Sound Detection (Non-Vocal Track)", 
-                    value=False,
-                    info="Requires Vocal Separation. Tries to identify non-speech sounds.",
-                    interactive=False # Initially disabled
-                )
 
-                hf_token = gr.Textbox(
-                    label="Hugging Face Token (Required)", 
-                    placeholder="Set your Hugging Face token for pyannote.audio",
-                    type="password",
-                    info="Get token at huggingface.co/settings/tokens"
-                )
+                with gr.Row():
+                    second_pass_min_duration = gr.Slider(
+                        label="Second Pass Min Duration (s)",
+                        minimum=0.5,
+                        maximum=30.0,
+                        step=0.5,
+                        value=5.0,
+                        info="Minimum segment length to consider for second pass refinement",
+                        interactive=True # Start enabled, update based on enable_second_pass
+                    )
+                    
+                    # Sound detection checkbox - interactivity handled later
+                    attempt_sound_detection = gr.Checkbox(
+                        label="Attempt Sound Detection (CLAP)",
+                        value=False,
+                        info="Identify non-speech sounds (requires Vocal Separation)",
+                        interactive=False # Initially disabled
+                    )
+
+                # Add CLAP configuration sliders
+                with gr.Row():
+                    clap_chunk_duration = gr.Slider(
+                        label="CLAP Chunk Duration (s)",
+                        minimum=1.0,
+                        maximum=10.0, # Adjust max as needed
+                        step=0.5,
+                        value=5.0,
+                        info="Processing chunk size for CLAP sound detection",
+                        interactive=False # Start disabled
+                    )
+                    clap_threshold = gr.Slider(
+                        label="CLAP Detection Threshold",
+                        minimum=0.1, 
+                        maximum=1.0,
+                        step=0.05,
+                        value=0.7,
+                        info="Confidence threshold for CLAP (higher = stricter)",
+                        interactive=False # Start disabled
+                    )
+
+                # Add Textbox for CLAP prompts
+                with gr.Row():
+                    clap_target_prompts = gr.Textbox(
+                        label="CLAP Target Prompts (Optional)",
+                        placeholder="e.g., telephone ringing, dial tone, music",
+                        info="Comma-separated list. If empty, uses defaults.",
+                        lines=1,
+                        interactive=False # Start disabled
+                    )
+
+                hf_token = gr.Textbox(label="Hugging Face Token", type="password", info="Required for speaker diarization. Get token from huggingface.co/settings/tokens.")
         
         submit_button = gr.Button("Process Audio", variant="primary")
         
@@ -289,20 +351,63 @@ def build_interface():
                 input_file, input_folder, url, output_folder, model, 
                 num_speakers, auto_speakers, enable_vocal_separation,
                 enable_word_extraction, enable_second_pass,
+                second_pass_min_duration,
                 attempt_sound_detection,
-                hf_token
+                hf_token,
+                split_stereo,
+                clap_chunk_duration,
+                clap_threshold,
+                clap_target_prompts,
+                force_mono_output
             ],
             outputs=[output_message, result_file, transcript_preview]
         )
         
         # Make Sound Detection checkbox interactive only if Vocal Separation is checked
         def update_sound_detection_interactivity(vocal_sep_enabled):
-            return gr.Checkbox(interactive=vocal_sep_enabled)
+            # Also resets sound detection value if vocal sep is disabled
+            # Use gr.update() for correct partial updates
+            if vocal_sep_enabled:
+                return gr.update(interactive=True)
+            else:
+                return gr.update(interactive=False, value=False)
 
+        # Make CLAP sliders interactive only if Sound Detection is checked
+        # Also handle the prompt textbox
+        def update_clap_config_interactivity(sound_detect_enabled):
+            updated_config = {
+                clap_chunk_duration: gr.Slider(interactive=sound_detect_enabled),
+                clap_threshold: gr.Slider(interactive=sound_detect_enabled),
+                clap_target_prompts: gr.Textbox(interactive=sound_detect_enabled)
+            }
+            # If disabling sound detection, clear the prompts textbox
+            if not sound_detect_enabled:
+                 updated_config[clap_target_prompts] = gr.Textbox(value="", interactive=False)
+                 
+            return updated_config
+
+        def update_second_pass_slider_interactivity(second_pass_enabled):
+            return gr.Slider(interactive=second_pass_enabled)
+
+        # Link vocal separation checkbox to sound detection interactivity
         enable_vocal_separation.change(
             fn=update_sound_detection_interactivity,
             inputs=enable_vocal_separation,
             outputs=attempt_sound_detection
+        )
+
+        # Link sound detection checkbox to CLAP config interactivity
+        attempt_sound_detection.change(
+            fn=update_clap_config_interactivity,
+            inputs=attempt_sound_detection,
+            outputs=[clap_chunk_duration, clap_threshold, clap_target_prompts] # Update outputs list
+        )
+
+        # Link second pass checkbox to slider interactivity
+        enable_second_pass.change(
+            fn=update_second_pass_slider_interactivity,
+            inputs=enable_second_pass,
+            outputs=second_pass_min_duration
         )
 
         # Add sample URLs only since file examples cause issues

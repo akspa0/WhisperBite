@@ -53,54 +53,89 @@ def download_audio(url, output_dir, force_redownload=True):
         logging.error(f"Error downloading audio from {url}: {e}")
         raise
 
+def get_media_info(file_path):
+    """Extract media information using ffprobe."""
+    if not file_path or not os.path.exists(file_path):
+        logging.warning(f"Media info requested for non-existent file: {file_path}")
+        return None
+
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", file_path
+        ]
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding='utf-8')
+        media_info = json.loads(result.stdout)
+        logging.info(f"Successfully extracted media info for {os.path.basename(file_path)}")
+        return media_info
+    except FileNotFoundError:
+        logging.error("ffprobe command not found. Please ensure ffmpeg (which includes ffprobe) is installed and in your PATH.")
+        return {"error": "ffprobe not found"}
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error running ffprobe on {os.path.basename(file_path)}: {e}")
+        logging.error(f"ffprobe stderr: {e.stderr}")
+        return {"error": f"ffprobe failed: {e.stderr[:200]}..."}
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding ffprobe JSON output for {os.path.basename(file_path)}: {e}")
+        return {"error": "Failed to decode ffprobe output"}
+    except Exception as e:
+        logging.error(f"Unexpected error getting media info for {os.path.basename(file_path)}: {e}")
+        return {"error": f"Unexpected error: {str(e)}"}
+
+def get_audio_channels(file_path):
+    """Get the number of audio channels using pydub."""
+    if not file_path or not os.path.exists(file_path):
+        logging.warning(f"Channel count requested for non-existent file: {file_path}")
+        return None
+    try:
+        audio = AudioSegment.from_file(file_path)
+        channels = audio.channels
+        logging.debug(f"Found {channels} channels for {os.path.basename(file_path)}")
+        return channels
+    except Exception as e:
+        logging.error(f"Error getting channel count for {os.path.basename(file_path)}: {e}")
+        # Don't return error dict here, None is fine for conditional checks
+        return None 
+
 def zip_results(output_dir, input_filename):
     """Zip the results directory contents into a single zip file."""
     base_name = os.path.splitext(os.path.basename(input_filename))[0]
-    # Place zip file one level *above* the specific output_dir if possible, 
-    # otherwise it gets included in the walk.
     parent_dir = os.path.dirname(output_dir)
-    zip_filename = os.path.join(parent_dir, f"{base_name}_results_{os.path.basename(output_dir)}.zip") # Add timestamped folder name for uniqueness
+    zip_filename = os.path.join(parent_dir, f"{base_name}_results_{os.path.basename(output_dir)}.zip") 
 
-    # Ensure parent directory exists (e.g., if output_dir was created at top level)
     os.makedirs(parent_dir, exist_ok=True)
 
     logging.info(f"Creating zip archive: {zip_filename}")
 
-    # Folders to exclude from the zip
-    excluded_folders = ["normalized", "downloads"]
-    # Files to exclude (like the zip itself if it ended up in the output_dir)
+    excluded_folders = ["normalized", "downloads", "stereo_split"] # Exclude stereo split temp dir
     excluded_files = [os.path.basename(zip_filename)] 
 
     with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(output_dir):
-            # Modify dirs in place to prevent walking into excluded folders
             dirs[:] = [d for d in dirs if d not in excluded_folders]
 
             for file in files:
                 if file in excluded_files:
                     continue
+                # Ensure we include the YAML file and not the old TXT file
+                if file == "master_transcript.txt":
+                    continue 
+                # Include the fallback JSON if YAML failed
+                # if file == "master_transcript_fallback.json":
+                #     pass # Allow fallback json
+                # if file == "master_transcript_error.yaml":
+                #     pass # Allow error yaml
                 
                 full_path = os.path.join(root, file)
-                # Archive name is path relative to output_dir
+                # Archive name should be relative to output_dir to maintain structure inside zip
                 archive_name = os.path.relpath(full_path, output_dir)
+                # Use forward slashes in archive name
+                archive_name = archive_name.replace("\\", "/") 
                 
                 logging.debug(f"Adding to zip: {full_path} as {archive_name}")
                 zipf.write(full_path, archive_name)
 
-        # --- Optionally, add metadata --- 
-        # (Can be refined later based on what's useful)
-        try:
-            metadata = {
-                "source_file": os.path.basename(input_filename),
-                "processing_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                # Add more metadata if needed, e.g., parameters used
-            }
-            from io import BytesIO
-            metadata_bytes = BytesIO(json.dumps(metadata, indent=2).encode('utf-8'))
-            zipf.writestr("processing_metadata.json", metadata_bytes.getvalue())
-        except Exception as meta_err:
-             logging.warning(f"Could not generate or add metadata.json: {meta_err}")
-        # --- End metadata --- 
+        # --- Metadata generation removed (now part of YAML) --- 
 
     logging.info(f"Successfully created zip file: {zip_filename}")
     return zip_filename
