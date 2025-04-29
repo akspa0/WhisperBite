@@ -1,56 +1,98 @@
-# Progress
+# Progress Status
 
-**What Works:**
-*   Main processing pipeline (normalization, optional vocal separation, diarization, slicing, transcription).
-*   Gradio Web UI (`app.py`).
-*   Command-line interface (`whisperBite.py`).
-*   Handling of file (audio/video), directory (newest file), and URL inputs.
-*   Automatic audio extraction from video files using `ffmpeg`.
-*   Basic error handling and logging.
-*   Manual speaker count setting (now default).
-*   Optional automatic speaker count detection (disabled by default).
-*   Optional second-pass diarization refinement logic implemented (mono path).
-*   Optional word audio extraction (disabled by default).
-*   **Optional Sound Detection using CLAP:** 
-    *   Implemented via `sound_detection.py` using `transformers`.
-    *   Requires `--enable_vocal_separation`.
-    *   Configurable via CLI (`--attempt_sound_detection`, `--clap_chunk_duration`, `--clap_threshold`) and UI.
-*   Result zipping.
-*   Correct Demucs execution (using `-n` flag and internal chunking).
-*   Speaker labels formatted as `S0`, `S1`, `S0_L`, `S0_R`.
-*   YAML Output (`master_transcript.yaml`) with metadata and structured segments (mono/stereo/second-pass/sound events).
-*   Configurable Second Pass (`--second_pass_min_duration`).
-*   Optional Stereo Splitting (`--split_stereo`).
-*   Dependency management via `requirements.txt` (updated for CLAP).
-*   File logging to output directory (`processing.log`).
+## What Works
 
-**What Needs Work/Verification:**
-*   **Implement CLAP - Configurable Prompts:** Add UI/CLI options (`--clap_target_prompts`) for custom sound prompts.
-*   **Implement CLAP - Event Logging:** Log detected sound events (label, time, confidence) to `processing.log`.
-*   **Implement UI - Pyannote Clarity:** Add info text to UI explaining Pyannote/HF token need for diarization.
-*   **Testing (Post-Enhancements):** 
-    *   CLAP Accuracy/Performance (default/custom prompts).
-    *   CLAP Event Logging verification.
-    *   Stereo Split Functionality & interactions.
-    *   Second Pass (Mono) Merging Logic (check logs).
-    *   YAML Output Structure & relative paths.
-*   **Implement Second Pass (Stereo):** Add refinement logic for the `split_stereo` path.
-*   **Implement Auto Speaker Detection (Stereo):** Add per-channel detection logic.
-*   Evaluate Robustness: `detect_optimal_speakers` (mono), media info extraction.
-*   Evaluate Edge Cases: File handling, tool failures.
-*   Performance Optimization: Long files (Whisper, Pyannote, Demucs).
-*   Tune Parameters: Demucs chunking, audio fades/merge gaps.
-*   Improve Dependency Checking: `ffmpeg`/`demucs` availability/version.
-*   Address Gradio temporary file cleanup.
-*   Packaging for deployment.
+### 1. Core Functionality
+- ✅ Audio file processing
+- ✅ Video audio extraction
+- ✅ Vocal separation (Demucs)
+- ✅ Sound detection (CLAP) - *Basic integration, prompts fixed*
+- ✅ Event detection - *Basic integration, prompts fixed*
+- ✅ Speaker Diarization (Pyannote)
+- ✅ Transcription (Whisper)
+- ✅ Stereo Splitting
+- ✅ Audio Normalization
+- ✅ Stop/Cancel Mechanism (UI -> Backend)
+- ⚠️ Output Directory Structure - *Broken, pending restoration*
+- ⚠️ UI Clarity & Configuration - *Confusing, pending refactor*
 
-**Current Status:** CLAP sound detection implemented, replacing YAMNet. `requirements.txt` updated. Configuration options added to CLI and UI. **Planning CLAP enhancements (prompts, logging) and UI clarity updates before testing.**
+### 2. Features
+- ✅ Multiple input formats (File, Folder, URL)
+- ✅ Video audio extraction
+- ✅ Audio normalization
+- ✅ Vocal/Non-vocal separation
+- ✅ Speaker count detection (manual/auto)
+- ✅ Second-pass diarization refinement (mono path)
+- ✅ Word-level timestamps/audio (optional)
+- ✅ Event-guided transcription - *Basic logic fixed*
+- ⚠️ Configurable Event/Sound Detection - *Prompts/settings partially disconnected from UI, pending refactor*
+- ⚠️ Stereo Split Second Pass - *Not implemented*
+- ⚠️ Per-channel Auto Speaker Detection (Stereo Split) - *Not implemented*
 
-**Known Issues:**
-*   Potential duplication in master transcript when second pass is used (mono path - needs log verification).
-*   Second pass refinement **only implemented for mono processing path.**
-*   Auto speaker detection **not implemented per-channel for stereo split.**
-*   Folder input only processes the newest compatible file.
-*   Potential filename parsing errors in `transcribe_with_whisper` (fallback exists).
-*   Demucs availability check is basic.
-*   Sound detection accuracy depends heavily on CLAP model, prompts, threshold, and audio quality.
+## Current Status
+
+### 1. UI & Configuration
+```status
+⚠️ UI needs refactoring (Detection Tab)
+⚠️ Preset interactivity for detection controls needed
+⚠️ Configuration flow for detection needs rework
+✅ Basic preset selection works
+```
+
+### 2. Processing Pipeline
+```status
+✅ Core steps (normalize, separate, diarize, transcribe) functional
+✅ Stop mechanism functional
+✅ Event/Sound detection runs, prompt handling improved
+✅ Event-guided transcription logic improved
+⚠️ Output directory structure incorrect
+```
+
+### 3. Output Organization
+```status
+⚠️ No unique run directory created
+⚠️ No step-specific subdirectories created
+✅ Basic YAML/Text output generated (but in wrong location)
+```
+
+## Implementation Progress
+
+### 1. Completed / Fixed
+- Basic audio processing pipeline
+- Vocal separation (Demucs)
+- Diarization & Transcription (Pyannote, Whisper)
+- CLAP Integration (Sound/Event Detection)
+- Stereo Splitting
+- Second Pass (Mono)
+- Stop mechanism implementation
+- **Fixes:** `stop_event` AttributeError, `KeyError: 'workflow'`, `KeyError: 'name'`, `TypeError` in event-guided transcription loop, Initial prompt handling fixes for event/sound detection.
+
+### 2. In Progress
+- **UI Refactoring:** Creating "Detection" tab, separating/adding controls, implementing preset-based interactivity.
+- **Output Directory Restoration:** Implementing unique, timestamped run directory creation with step-specific subfolders (`normalized/`, `demucs/`, `events/`, `sounds/`, etc.).
+- **Configuration Flow Rework:** Aligning UI inputs (`app.py`), preset kwargs (`presets.py`), and backend config usage (`whisperBite.py`) for distinct Event and Sound detection settings.
+
+### 3. Planned
+- Testing of refactored UI and output structure.
+- Investigation of detection thresholds if needed.
+- Stereo split second-pass implementation.
+- Per-channel auto speaker detection for stereo split.
+- (Low Priority) DAC Encoding exploration.
+- Packaging (Pinokio).
+
+## Next Steps
+
+### 1. Immediate
+- Implement UI Refactoring (`app.py`: Detection Tab, controls, interactivity).
+- Implement Output Directory Structure creation (`app.py`).
+- Update backend config flow (`app.py`, `presets.py`, `whisperBite.py`).
+
+### 2. Short Term
+- Test UI, output structure, and detection with various presets/inputs.
+- Evaluate detection accuracy/thresholds if issues persist.
+
+### 3. Medium Term
+- Implement stereo split second pass & per-channel auto speakers.
+- Enhance error handling & logging further.
+- Explore performance optimizations.
+- Package application.

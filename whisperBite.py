@@ -1,19 +1,39 @@
 import os
 import sys
 import argparse
-from datetime import datetime
+import datetime
 import logging
 import json
 import subprocess
-from whisper import load_model
-from pyannote.audio import Pipeline
-import torch
-from pydub import AudioSegment
-from utils import sanitize_filename, download_audio, zip_results, get_media_info, get_audio_channels
-from vocal_separation import separate_vocals_with_demucs
+import traceback
 import re
-from sound_detection import detect_sound_events, TARGET_SOUND_PROMPTS # Import default prompts
 import yaml
+from typing import Dict, List, Tuple, Optional, Any
+import threading
+
+# Third-party imports
+import torch
+import whisper
+from pyannote.audio import Pipeline
+from pydub import AudioSegment
+import numpy as np
+import soundfile as sf
+from transformers import AutoProcessor, ClapModel
+
+# Local imports
+from utils import sanitize_filename, download_audio, zip_results, get_media_info, get_audio_channels
+from vocal_separation import separate_vocals_with_demucs, enhance_vocals, export_audio_segments
+from sound_detection import (
+    detect_sound_events,
+    detect_and_cut_audio,
+    cut_audio_at_detections,
+    TARGET_SOUND_PROMPTS,
+    DEFAULT_CALL_CHUNK_DURATION,
+    DEFAULT_CALL_THRESHOLD,
+    # CALL_ANALYSIS_PROMPTS, # Not currently used directly here
+    # VOCAL_CUES_FOR_ANALYSIS, # Not currently used directly here
+)
+from event_detection import EventDetector, detect_and_save_events, DEFAULT_EVENTS
 
 # Configure logging
 logging.basicConfig(
@@ -54,7 +74,7 @@ def normalize_audio(input_audio, output_dir, target_lufs=-16):
     cmd = [
         "ffmpeg", "-y", "-i", input_audio,
         "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
-        "-ar", "44100", "-acodec", "pcm_s16le", output_file
+        "-ar", "48000", "-acodec", "pcm_s16le", output_file
     ]
     
     try:
@@ -401,7 +421,7 @@ def run_second_pass_diarization(first_pass_segment_info, first_pass_output_dir, 
         for segment_info in segments: # segments is now expected to be the list of dicts from slice_audio_by_speaker
             segment_path = segment_info['path']
             original_start_time = segment_info['start']
-            original_end_time = segment_info['end']
+            end_time = segment_info['end']
             original_duration = segment_info['duration']
             original_sequence = segment_info['sequence']
 
@@ -538,21 +558,19 @@ def extract_audio_from_video(video_path, output_wav_path):
     """Extracts audio from video file using ffmpeg."""
     logging.info(f"Extracting audio from video: {video_path}")
     try:
-        # Use ffmpeg to extract audio as 16-bit PCM WAV, 44.1kHz, mono
+        # Use ffmpeg to extract audio as 16-bit PCM WAV, 48kHz, mono
         # -vn: disable video recording
         # -acodec pcm_s16le: standard WAV audio codec
-        # -ar 44100: audio sample rate
+        # -ar 48000: audio sample rate
         # -ac 1: mono audio channel
         # -y: overwrite output file if exists
         cmd = [
             "ffmpeg", "-y", "-i", video_path,
-            "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1",
+            "-vn", "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "1",
             output_wav_path
         ]
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True) # Added text=True
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         logging.info(f"Successfully extracted audio to: {output_wav_path}")
-        # logging.debug(f"ffmpeg output: {result.stdout}") # Optional: log ffmpeg output
-        # logging.debug(f"ffmpeg stderr: {result.stderr}")
         return True
     except subprocess.CalledProcessError as e:
         logging.error(f"Error extracting audio using ffmpeg: {e}")
@@ -566,506 +584,419 @@ def extract_audio_from_video(video_path, output_wav_path):
         logging.error(f"An unexpected error occurred during audio extraction: {e}")
         return False
 
-def process_audio(input_path, output_dir, model_name, enable_vocal_separation, num_speakers, 
-                  auto_speakers=False, enable_word_extraction=False, enable_second_pass=False,
-                  attempt_sound_detection=False, second_pass_min_duration=5.0,
-                  split_stereo=False, input_url=None, 
-                  clap_chunk_duration: float = 5.0, 
-                  clap_threshold: float = 0.7,
-                  clap_target_prompts: str | None = None,
-                  force_mono_output: bool = False):
-    """Unified pipeline for audio processing."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logging.info(f"Using device: {device}")
-    
-    # Load models FIRST to avoid repeated loading
-    logging.info(f"Loading Whisper model: {model_name}")
-    model = load_model(model_name)
-    
-    logging.info("Loading diarization pipeline")
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
-    pipeline.to(device)
-    
-    # Determine initial input file and base name
-    initial_input_file = None
-    input_basename = None
-    extracted_audio_temp_file = None # Keep track if we extract audio
-
-    if os.path.isfile(input_path):
-        initial_input_file = input_path
-        input_basename = os.path.splitext(os.path.basename(initial_input_file))[0]
-    elif os.path.isdir(input_path):
-        # If directory, find the most recent compatible file (audio or video)
-        logging.info(f"Input is a directory: {input_path}. Searching for newest compatible file.")
-        compatible_extensions = ('.mp3', '.wav', '.m4a', '.ogg', '.flac') + VIDEO_EXTENSIONS
-        all_files = [
-            f for f in os.listdir(input_path) 
-            if os.path.isfile(os.path.join(input_path, f)) and f.lower().endswith(compatible_extensions)
-        ]
-        if not all_files:
-            logging.error(f"No compatible audio or video files found in directory: {input_path}")
-            return None
-            
-        all_files.sort(key=lambda x: os.path.getmtime(os.path.join(input_path, x)), reverse=True)
-        newest_file = all_files[0]
-        logging.info(f"Processing newest file found in directory: {newest_file}")
-        initial_input_file = os.path.join(input_path, newest_file)
-        input_basename = os.path.splitext(newest_file)[0]
-    else:
-        logging.error(f"Input path exists but is neither a file nor a directory: {input_path}")
+def make_path_relative(absolute_path, base_dir):
+    """Convert absolute paths to relative paths for YAML output."""
+    if not absolute_path:
         return None
-
-    # Create output directory based on the original input base name
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    final_output_dir = os.path.join(output_dir, f"{input_basename}_{timestamp}") 
-    os.makedirs(final_output_dir, exist_ok=True)
-    logging.info(f"Output directory set to: {final_output_dir}")
-
-    # --- Setup File Logging --- 
-    log_file_path = os.path.join(final_output_dir, 'processing.log')
-    file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
-    log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s") # Use the same format
-    file_handler.setFormatter(log_formatter)
-    
-    root_logger = logging.getLogger() # Get the root logger
-    root_logger.addHandler(file_handler)
-    logging.info(f"File logging started. Log file: {log_file_path}")
-    # --- End File Logging Setup --- 
-
-    # --- Parse CLAP Prompts --- 
-    clap_prompts_to_use = None
-    if attempt_sound_detection and clap_target_prompts:
-        # Split comma-separated string, strip whitespace, remove empty strings
-        custom_prompts = [p.strip() for p in clap_target_prompts.split(',') if p.strip()]
-        if custom_prompts:
-            clap_prompts_to_use = custom_prompts
-            logging.info(f"Using custom CLAP prompts: {clap_prompts_to_use}")
-        else:
-            logging.warning("Custom CLAP prompts string provided but was empty after parsing. Using defaults.")
-            clap_prompts_to_use = TARGET_SOUND_PROMPTS # Fallback to default
-    elif attempt_sound_detection:
-        clap_prompts_to_use = TARGET_SOUND_PROMPTS # Use default if detection enabled but no custom provided
-        logging.info(f"Using default CLAP prompts: {clap_prompts_to_use}")
-    # else: clap_prompts_to_use remains None if sound detection is off
-    # --- End Parse CLAP Prompts --- 
-
-    # --- Initialize YAML Output Structure --- 
-    final_yaml_data = {
-        'metadata': {
-            'input_source': os.path.basename(initial_input_file) if initial_input_file else 'N/A',
-            'input_url': input_url if input_url else None,
-            'processing_timestamp': timestamp,
-            'options': {
-                'model': model_name,
-                'num_speakers': num_speakers,
-                'auto_speakers': auto_speakers,
-                'vocal_separation': enable_vocal_separation,
-                'word_extraction': enable_word_extraction,
-                'second_pass': enable_second_pass,
-                'second_pass_min_duration': second_pass_min_duration if enable_second_pass else None,
-                'sound_detection': attempt_sound_detection,
-                'split_stereo': split_stereo,
-                'clap_chunk_duration': clap_chunk_duration if attempt_sound_detection else None,
-                'clap_threshold': clap_threshold if attempt_sound_detection else None,
-                'clap_target_prompts': clap_prompts_to_use if attempt_sound_detection else None,
-                'force_mono_output': force_mono_output
-            },
-            'media_info': None # Will be populated later
-        },
-        # Segments structure will be added based on processing path
-    }
-    # --- End YAML Structure Init --- 
-
-    audio_to_process = None
     try:
-        # --- Get Media Info --- 
-        logging.info(f"Getting media info for: {initial_input_file}")
-        final_yaml_data['metadata']['media_info'] = get_media_info(initial_input_file)
-        # --- End Media Info --- 
-        
-        # --- Video Extraction / Initial Audio Setup (Keep as is) --- 
-        if initial_input_file.lower().endswith(VIDEO_EXTENSIONS):
-            logging.info(f"Detected video input: {initial_input_file}")
-            extracted_audio_temp_file = os.path.join(final_output_dir, f"{input_basename}_extracted_audio.wav")
-            
-            if not extract_audio_from_video(initial_input_file, extracted_audio_temp_file):
-                logging.error("Audio extraction failed. Aborting processing.")
-                raise RuntimeError("Audio extraction failed") # Raise to ensure cleanup
-            
-            audio_to_process = extracted_audio_temp_file
-        else:
-            audio_to_process = initial_input_file
-        logging.info(f"Audio file for processing: {audio_to_process}")
-        # --- End Video Extraction --- 
+        return os.path.relpath(absolute_path, base_dir)
+    except ValueError:
+        logging.warning(f"Could not make path relative: {absolute_path}")
+        return absolute_path
 
-        # 1. Normalize the audio (use the file determined above)
-        normalized_file = normalize_audio(audio_to_process, final_output_dir)
-        logging.info(f"Normalized audio: {normalized_file}")
+def get_audio_from_input(input_path: str, output_dir: str) -> str:
+    """
+    Get audio from input file, handling video files if necessary.
+    Returns path to audio file.
+    """
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input file not found: {input_path}")
         
-        # The rest of the pipeline uses the *normalized* file path
-        pipeline_audio_input = normalized_file
-        no_vocals_path = None # Initialize path for non-vocal track
+    # Check if input is already an audio file
+    audio_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.aac'}
+    if os.path.splitext(input_path)[1].lower() in audio_extensions:
+        return input_path
         
-        # 2. Optional vocal separation
-        if enable_vocal_separation:
-            logging.info("Attempting vocal separation")
+    # Extract audio from video if needed
+    audio_output = os.path.join(output_dir, "extracted_audio.wav")
+    try:
+        subprocess.run([
+            'ffmpeg', '-i', input_path,
+            '-vn',  # Disable video
+            '-acodec', 'pcm_s16le',  # Use WAV codec
+            '-ar', '48000',  # Set sample rate to 48kHz
+            '-ac', '2',  # Set to stereo
+            audio_output
+        ], check=True)
+        return audio_output
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to extract audio: {e}")
+        raise
+
+def process_stereo_channels(
+    audio_path: str,
+    output_dir: str,
+    pipeline: Pipeline,
+    model: Any,
+    num_speakers: int,
+    auto_speakers: bool,
+    enable_word_extraction: bool,
+    force_mono_output: bool
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Process left and right channels of stereo audio separately.
+    Returns tuple of (left_channel_segments, right_channel_segments).
+    """
+    # Split stereo into separate channels
+    audio = AudioSegment.from_file(audio_path)
+    
+    # Extract left channel
+    left_channel = audio.split_to_mono()[0]
+    left_path = os.path.join(output_dir, "left_channel.wav")
+    left_channel.export(left_path, format="wav")
+    
+    # Extract right channel
+    right_channel = audio.split_to_mono()[1]
+    right_path = os.path.join(output_dir, "right_channel.wav")
+    right_channel.export(right_path, format="wav")
+    
+    # Process each channel
+    try:
+        # Process left channel
+        left_speaker_dir = os.path.join(output_dir, "speakers_left")
+        os.makedirs(left_speaker_dir, exist_ok=True)
+        
+        actual_speakers_left = num_speakers
+        if auto_speakers:
             try:
-                logging.info(f"[Vocal Separation] Calling separate_vocals_with_demucs with input: {pipeline_audio_input}")
-                # Now receives a tuple: (vocals_path, no_vocals_path)
-                vocals_file, no_vocals_path_returned = separate_vocals_with_demucs(pipeline_audio_input, final_output_dir)
-                logging.info(f"[Vocal Separation] separate_vocals_with_demucs returned: Vocals={vocals_file}, NoVocals={no_vocals_path_returned}")
-                
-                # Update main pipeline input if vocals file is valid
-                if vocals_file and os.path.exists(vocals_file):
-                    pipeline_audio_input = vocals_file # Update input for next steps
-                    logging.info(f"[Vocal Separation] Successfully updated pipeline_audio_input to: {pipeline_audio_input}")
-                else:
-                    logging.warning("Vocal separation failed or produced no output, using normalized audio for subsequent steps.")
-                
-                # Store the no_vocals path if valid
-                if no_vocals_path_returned and os.path.exists(no_vocals_path_returned):
-                    no_vocals_path = no_vocals_path_returned
-                    logging.info(f"[Vocal Separation] Found valid no_vocals track: {no_vocals_path}")
-                else:
-                    logging.info("[Vocal Separation] No valid no_vocals track found or returned.")
-                    no_vocals_path = None # Ensure it's None
-
+                actual_speakers_left = detect_optimal_speakers(pipeline, left_path)
             except Exception as e:
-                logging.warning(f"Vocal separation error: {e}. Using normalized audio for subsequent steps.")
-                vocals_file = None # Ensure these are None on error
-                no_vocals_path = None
-        
-        # --- Check Channels for Stereo Split Logic --- 
-        channels = get_audio_channels(pipeline_audio_input)
-        perform_stereo_split = split_stereo and channels == 2
-        logging.info(f"Audio has {channels} channels. Stereo split active: {perform_stereo_split}")
-        # --- End Channel Check --- 
-
-        # --- Initialize Segment Lists --- 
-        first_pass_segments_L = []
-        first_pass_segments_R = []
-        first_pass_segments_mono = []
-        sound_event_segments = []
-        # --- End Init --- 
-        
-        # --- Define and create speaker output directory (needed for both paths) ---
-        speaker_output_dir = os.path.join(final_output_dir, "speakers") 
-        os.makedirs(speaker_output_dir, exist_ok=True)
-        # --- End Directory Definition ---
-        
-        # --- Main Processing Logic (Conditional Stereo Split) --- 
-        if perform_stereo_split:
-            logging.info("Processing stereo channels separately.")
-            stereo_processing_dir = os.path.join(final_output_dir, "stereo_split")
-            os.makedirs(stereo_processing_dir, exist_ok=True)
-            
-            # Split into L/R
-            try:
-                logging.info(f"Splitting stereo file: {pipeline_audio_input}")
-                stereo_audio = AudioSegment.from_file(pipeline_audio_input)
-                mono_channels = stereo_audio.split_to_mono()
-                if len(mono_channels) == 2:
-                    left_channel_path = os.path.join(stereo_processing_dir, f"{input_basename}_L.wav")
-                    right_channel_path = os.path.join(stereo_processing_dir, f"{input_basename}_R.wav")
-                    mono_channels[0].export(left_channel_path, format="wav")
-                    mono_channels[1].export(right_channel_path, format="wav")
-                    logging.info(f"Exported Left channel to: {left_channel_path}")
-                    logging.info(f"Exported Right channel to: {right_channel_path}")
-                else:
-                    logging.warning(f"Expected 2 channels after splitting {pipeline_audio_input}, but got {len(mono_channels)}. Proceeding with mono.")
-                    perform_stereo_split = False # Fallback to mono processing
-            except Exception as split_err:
-                logging.error(f"Error splitting stereo audio: {split_err}. Proceeding with mono.")
-                perform_stereo_split = False # Fallback to mono processing
-
-            # If split succeeded, process L and R
-            if perform_stereo_split:
-                # --- Process Left Channel --- 
-                logging.info("--- Processing Left Channel ---")
-                actual_num_speakers_L = num_speakers # TODO: Auto-detect per channel?
-                if auto_speakers:
-                     try:
-                         actual_num_speakers_L = detect_optimal_speakers(pipeline, left_channel_path, max_speakers=max(1, num_speakers))
-                     except Exception as e:
-                         logging.warning(f"Auto speaker detection failed for Left channel: {e}. Using provided value: {num_speakers}")
-                         actual_num_speakers_L = num_speakers
+                logging.warning(f"Auto speaker detection failed for left channel: {e}")
+                actual_speakers_left = num_speakers
                 
-                logging.info(f"Running L-channel diarization with {actual_num_speakers_L} speakers")
-                diarization_L = pipeline(left_channel_path, num_speakers=actual_num_speakers_L)
-                segment_info_dict_L = slice_audio_by_speaker(left_channel_path, diarization_L, speaker_output_dir, speaker_suffix="_L", force_mono_output=force_mono_output) # Pass flag
-                logging.info(f"Sliced L-channel audio: {list(segment_info_dict_L.keys())}")
-                first_pass_segments_L = transcribe_with_whisper(model, segment_info_dict_L, final_output_dir, enable_word_extraction=enable_word_extraction, speaker_suffix="_L", force_mono_output=force_mono_output) # Pass flag
-                logging.info("L-channel transcription complete")
-                # --- End Process Left Channel --- 
+        diarization_left = pipeline(left_path, num_speakers=actual_speakers_left)
+        segments_left = slice_audio_by_speaker(
+            left_path, 
+            diarization_left, 
+            left_speaker_dir,
+            force_mono_output=force_mono_output
+        )
+        processed_left = transcribe_with_whisper(
+            model,
+            segments_left,
+            output_dir,
+            enable_word_extraction=enable_word_extraction,
+            force_mono_output=force_mono_output
+        )
+        
+        # Process right channel
+        right_speaker_dir = os.path.join(output_dir, "speakers_right")
+        os.makedirs(right_speaker_dir, exist_ok=True)
+        
+        actual_speakers_right = num_speakers
+        if auto_speakers:
+            try:
+                actual_speakers_right = detect_optimal_speakers(pipeline, right_path)
+            except Exception as e:
+                logging.warning(f"Auto speaker detection failed for right channel: {e}")
+                actual_speakers_right = num_speakers
                 
-                # --- Process Right Channel --- 
-                logging.info("--- Processing Right Channel ---")
-                actual_num_speakers_R = num_speakers # TODO: Auto-detect per channel?
-                if auto_speakers:
-                    try:
-                         actual_num_speakers_R = detect_optimal_speakers(pipeline, right_channel_path, max_speakers=max(1, num_speakers))
-                    except Exception as e:
-                         logging.warning(f"Auto speaker detection failed for Right channel: {e}. Using provided value: {num_speakers}")
-                         actual_num_speakers_R = num_speakers
-                         
-                logging.info(f"Running R-channel diarization with {actual_num_speakers_R} speakers")
-                diarization_R = pipeline(right_channel_path, num_speakers=actual_num_speakers_R)
-                segment_info_dict_R = slice_audio_by_speaker(right_channel_path, diarization_R, speaker_output_dir, speaker_suffix="_R", force_mono_output=force_mono_output) # Pass flag
-                logging.info(f"Sliced R-channel audio: {list(segment_info_dict_R.keys())}")
-                first_pass_segments_R = transcribe_with_whisper(model, segment_info_dict_R, final_output_dir, enable_word_extraction=enable_word_extraction, speaker_suffix="_R", force_mono_output=force_mono_output) # Pass flag
-                logging.info("R-channel transcription complete")
-                # --- End Process Right Channel --- 
+        diarization_right = pipeline(right_path, num_speakers=actual_speakers_right)
+        segments_right = slice_audio_by_speaker(
+            right_path, 
+            diarization_right, 
+            right_speaker_dir,
+            force_mono_output=force_mono_output
+        )
+        processed_right = transcribe_with_whisper(
+            model,
+            segments_right,
+            output_dir,
+            enable_word_extraction=enable_word_extraction,
+            force_mono_output=force_mono_output
+        )
         
-        # --- Mono Processing Path (Default or Fallback) ---
-        if not perform_stereo_split:
-            logging.info("Processing as single (mono) track.")
-            # 3. Diarization
-            actual_num_speakers = num_speakers
-            if auto_speakers:
-                try:
-                    actual_num_speakers = detect_optimal_speakers(pipeline, pipeline_audio_input)
-                except Exception as e:
-                    logging.warning(f"Auto speaker detection failed: {e}. Using provided value: {num_speakers}")
-                    actual_num_speakers = num_speakers
+        # Add channel information to segments
+        for segment in processed_left:
+            segment['channel'] = 'left'
+        for segment in processed_right:
+            segment['channel'] = 'right'
             
-            logging.info(f"Running diarization with {actual_num_speakers} speakers on {pipeline_audio_input}")
-            diarization = pipeline(pipeline_audio_input, num_speakers=actual_num_speakers)
-            
-            # 4. Slicing
-            segment_info_dict = slice_audio_by_speaker(pipeline_audio_input, diarization, speaker_output_dir, force_mono_output=force_mono_output) # Pass flag
-            logging.info(f"Sliced audio into speakers: {list(segment_info_dict.keys())}")
-            
-            # 5. Transcription
-            logging.info("Starting transcription")
-            first_pass_segments_mono = transcribe_with_whisper(model, segment_info_dict, final_output_dir, enable_word_extraction=enable_word_extraction, force_mono_output=force_mono_output) # Pass flag
-            logging.info("Transcription complete")
-
-            # 5b. Optional Second Pass (Only for Mono Path for now)
-            final_segments_for_transcript = first_pass_segments_mono # Default to first pass
-            refined_segments_info = [] 
-            if enable_second_pass:
-                logging.info("Starting second pass refinement...")
-                refined_segments_info = run_second_pass_diarization(
-                    first_pass_segment_info=segment_info_dict, 
-                    first_pass_output_dir=speaker_output_dir, 
-                    diarization_pipeline=pipeline,
-                    whisper_model=model,
-                    final_output_dir=final_output_dir, 
-                    segment_min_duration=second_pass_min_duration,
-                    force_mono_output=force_mono_output
-                )
-                logging.info("Second pass refinement complete.")
-            
-                # --- Merge first and second pass results (for mono path) --- 
-                if refined_segments_info:
-                    logging.info("Merging first and second pass transcripts for mono processing...")
-                    # Create lookup dict as before
-                    refined_lookup = {}
-                    parsing_failures = 0 
-                    for ref_seg in refined_segments_info:
-                        try:
-                            original_seq = int(os.path.basename(ref_seg['audio_file']).split('_')[0])
-                            if original_seq not in refined_lookup:
-                                refined_lookup[original_seq] = []
-                            refined_lookup[original_seq].append(ref_seg)
-                        except (IndexError, ValueError):
-                            logging.warning(f"[Merge Debug] PARSE FAILED for original sequence from refined segment filename: {ref_seg['audio_file']}") 
-                            parsing_failures += 1
-                            continue
-                    if parsing_failures > 0:
-                        logging.warning(f"[Merge Debug] Total filename parsing failures: {parsing_failures}")
-
-                    merged_segments = []
-                    processed_first_pass_seqs = set(refined_lookup.keys())
-                    
-                    # Add non-refined first pass segments
-                    for fp_seg in first_pass_segments_mono:
-                        if fp_seg['sequence'] not in processed_first_pass_seqs:
-                            merged_segments.append(fp_seg)
-                    
-                    # Add all refined segments
-                    for ref_list in refined_lookup.values():
-                        merged_segments.extend(ref_list)
-                        
-                    merged_segments.sort(key=lambda x: x['start'])
-                    final_segments_for_transcript = merged_segments
-                    logging.info("Mono merging complete.")
-                else:
-                    logging.info("No segments were refined in second pass for mono processing.")
-                    # Keep final_segments_for_transcript as first_pass_segments_mono
-            else:
-                logging.info("Second pass refinement skipped for mono processing.")
-                # Keep final_segments_for_transcript as first_pass_segments_mono
-        # --- End Mono Processing Path --- 
-
-        # --- Sound Detection (Run on no_vocals regardless of split) --- 
-        if enable_vocal_separation and attempt_sound_detection and no_vocals_path:
-            logging.info(f"Attempting sound detection with CLAP on non-vocal track: {no_vocals_path}")
-            logging.info(f"CLAP Params: Chunk={clap_chunk_duration}s, Threshold={clap_threshold}")
-            # Logging of prompts to use is handled during parsing above
-            try:
-                sound_event_segments = detect_sound_events(
-                    audio_path=no_vocals_path, 
-                    chunk_duration_s=clap_chunk_duration, 
-                    threshold=clap_threshold,
-                    target_prompts=clap_prompts_to_use # Pass the parsed list (or None for default)
-                )
-                logging.info(f"CLAP sound detection finished. Found {len(sound_event_segments)} potential sound events.")
-                # --- Log Individual Events --- 
-                if sound_event_segments:
-                    logging.info("--- Detected CLAP Sound Events --- ")
-                    for event in sound_event_segments:
-                        logging.info(f"  - Label: \"{event.get('text', 'N/A')}\" | Time: {event.get('start', 0.0):.2f}s - {event.get('end', 0.0):.2f}s | Confidence: {event.get('confidence', 0.0):.3f}")
-                    logging.info("----------------------------------")
-                # --- End Log Individual Events --- 
-            except Exception as sound_err:
-                logging.error(f"Error during CLAP sound detection process for {no_vocals_path}: {sound_err}", exc_info=True)
-                sound_event_segments = [] 
-        else:
-            logging.info("Sound detection skipped based on options or missing no_vocals track.")
-        # --- End Sound Detection --- 
-
-        # --- Prepare Final YAML Data Structure --- 
-        logging.info("Preparing final data structure for YAML output...")
-        
-        # Make paths relative for YAML output
-        def make_path_relative(absolute_path):
-            if absolute_path and os.path.exists(absolute_path):
-                # Calculate path relative to the *parent* of final_output_dir
-                # because the zip file is created there.
-                output_parent_dir = os.path.dirname(final_output_dir)
-                try:
-                    relative = os.path.relpath(absolute_path, output_parent_dir)
-                    # Use forward slashes for better cross-platform compatibility in YAML/zip
-                    return relative.replace("\\", "/") 
-                except ValueError:
-                    # Paths might be on different drives on Windows
-                    logging.warning(f"Could not make path relative (different drives?): {absolute_path}")
-                    return absolute_path # Fallback to absolute path
-            return None
-
-        if perform_stereo_split:
-            # Structure for separate L/R channels
-            final_yaml_data['left_channel_segments'] = [
-                {**seg, 'audio_file': make_path_relative(seg.get('audio_file')),
-                        'transcript_file': make_path_relative(seg.get('transcript_file'))}
-                for seg in sorted(first_pass_segments_L, key=lambda x: x['start'])
-            ]
-            final_yaml_data['right_channel_segments'] = [
-                 {**seg, 'audio_file': make_path_relative(seg.get('audio_file')),
-                         'transcript_file': make_path_relative(seg.get('transcript_file'))}
-                 for seg in sorted(first_pass_segments_R, key=lambda x: x['start'])
-            ]
-        else:
-            # Structure for mono processing (potentially with nested refinements)
-            # Rework the merging logic slightly to build the nested structure directly
-            processed_segments_for_yaml = []
-            processed_fp_sequences = set()
-            
-            # Add refined segments first, storing them under their original
-            if enable_second_pass and refined_segments_info:
-                 refined_lookup_yaml = {} # Build lookup {orig_seq: [refined_segment_dicts]} 
-                 for ref_seg in refined_segments_info:
-                     # ... (parsing logic to get original_seq) ...
-                     try:
-                         original_seq = int(os.path.basename(ref_seg['audio_file']).split('_')[0])
-                         if original_seq not in refined_lookup_yaml:
-                             refined_lookup_yaml[original_seq] = []
-                         # Make paths relative here
-                         ref_seg_relative = {**ref_seg,
-                                              'audio_file': make_path_relative(ref_seg.get('audio_file')),
-                                              'transcript_file': make_path_relative(ref_seg.get('transcript_file'))}
-                         refined_lookup_yaml[original_seq].append(ref_seg_relative)
-                     except (IndexError, ValueError):
-                         continue # Skip segments where original sequence can't be parsed
-                 
-                 # Iterate through first pass, adding original + nested refined segments
-                 for fp_seg in first_pass_segments_mono:
-                     if fp_seg['sequence'] in refined_lookup_yaml:
-                         processed_fp_sequences.add(fp_seg['sequence'])
-                         processed_segments_for_yaml.append({
-                             **fp_seg,
-                             'audio_file': make_path_relative(fp_seg.get('audio_file')),
-                             'transcript_file': make_path_relative(fp_seg.get('transcript_file')),
-                             'refined': True,
-                             'refined_segments': sorted(refined_lookup_yaml[fp_seg['sequence']], key=lambda x: x['start'])
-                         })
-                     # else: # Handled in next loop
-                     #     pass
-            
-            # Add remaining unrefined first-pass segments
-            for fp_seg in first_pass_segments_mono:
-                if fp_seg['sequence'] not in processed_fp_sequences:
-                     processed_segments_for_yaml.append({
-                         **fp_seg,
-                         'audio_file': make_path_relative(fp_seg.get('audio_file')),
-                         'transcript_file': make_path_relative(fp_seg.get('transcript_file')),
-                         'refined': False
-                     })
-            
-            # Sort the final list of segments (originals, potentially with nested refined ones)
-            processed_segments_for_yaml.sort(key=lambda x: x['start'])
-            final_yaml_data['segments'] = processed_segments_for_yaml
-
-        # Add sound events (paths are already None, structure adjusted slightly in CLAP func)
-        final_yaml_data['sound_events'] = sorted(sound_event_segments, key=lambda x: x['start'])
-        logging.info("Data structure preparation complete.")
-        # --- End YAML Data Prep --- 
-        
-        # --- Write YAML Output --- 
-        yaml_output_path = os.path.join(final_output_dir, "master_transcript.yaml")
-        logging.info(f"Writing final YAML output to: {yaml_output_path}")
-        try:
-            with open(yaml_output_path, 'w', encoding='utf-8') as f:
-                # Use SafeDumper for security if loading untrusted YAML later
-                yaml.dump(final_yaml_data, f, indent=2, allow_unicode=True, sort_keys=False, Dumper=yaml.SafeDumper)
-        except Exception as yaml_err:
-            logging.error(f"Failed to write YAML output: {yaml_err}")
-            # Fallback: maybe write a JSON dump?
-            json_fallback_path = os.path.join(final_output_dir, "master_transcript_fallback.json")
-            try:
-                 with open(json_fallback_path, 'w', encoding='utf-8') as jf:
-                     json.dump(final_yaml_data, jf, indent=2)
-                 logging.warning(f"YAML write failed, wrote JSON fallback to: {json_fallback_path}")
-            except Exception as json_err:
-                 logging.error(f"Failed to write JSON fallback as well: {json_err}")
-        # --- End YAML Output --- 
-
-        # 6. Zip results (adjust to include YAML)
-        zip_file = zip_results(final_output_dir, initial_input_file) 
-        logging.info(f"Results zipped to: {zip_file}")
-        
-        return final_output_dir
+        return processed_left, processed_right
         
     except Exception as e:
-        # Catch general processing errors 
-        logging.error(f"Error processing {initial_input_file}: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
-        # Ensure YAML data includes the error if possible before returning None
-        final_yaml_data['error'] = traceback.format_exc()
-        yaml_output_path = os.path.join(final_output_dir, "master_transcript_error.yaml")
-        try:
-             with open(yaml_output_path, 'w', encoding='utf-8') as f:
-                 yaml.dump(final_yaml_data, f, indent=2, allow_unicode=True, sort_keys=False, Dumper=yaml.SafeDumper)
-        except Exception as final_yaml_err:
-             logging.error(f"Failed to write error YAML: {final_yaml_err}")
-        return None # Indicate failure
+        logging.error(f"Error processing stereo channels: {e}")
+        raise
     finally:
-        # Cleanup: Remove temporary extracted audio file
-        if extracted_audio_temp_file and os.path.exists(extracted_audio_temp_file):
+        # Cleanup temporary channel files
+        for path in [left_path, right_path]:
             try:
-                 logging.info(f"Cleaning up temporary extracted audio file: {extracted_audio_temp_file}")
-                 os.remove(extracted_audio_temp_file)
-            except OSError as e:
-                 logging.warning(f"Could not remove temporary audio file {extracted_audio_temp_file}: {e}")
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                logging.warning(f"Failed to remove temporary file {path}: {e}")
+
+def cut_audio_at_boundaries(audio_path: str, detected_events: list, output_dir: str) -> list:
+    """
+    Cut audio file at detected sound event boundaries.
+    
+    Args:
+        audio_path (str): Path to the audio file to cut
+        detected_events (list): List of detected sound events with timestamps
+        output_dir (str): Directory to save cut segments
         
-        # --- Clean up File Logging (Keep as is) --- 
-        if file_handler:
-            logging.info("Stopping file logging.")
-            root_logger.removeHandler(file_handler)
-            file_handler.close()
-        # --- End File Logging Cleanup ---
+    Returns:
+        list: List of dictionaries containing segment information
+    """
+    return cut_audio_at_detections(audio_path, detected_events, output_dir)
+
+def process_audio(
+    input_file: str,
+    output_dir: str,
+    preset_name: str,
+    preset_config: Dict[str, Any],
+    stop_event: Optional[threading.Event] = None,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+) -> Dict[str, Any]:
+    """
+    Process audio file according to preset configuration.
+    
+    Args:
+        input_file: Path to input audio/video file
+        output_dir: Directory to save outputs
+        preset_name: Name of the preset being used
+        preset_config: Processing preset configuration (dict inside the full preset)
+        stop_event: Optional threading.Event for cancellation
+        device: Device to run models on
+        
+    Returns:
+        Dict containing processing results and metadata
+    """
+    if stop_event and stop_event.is_set():
+        return {"status": "cancelled"}
+        
+    workflow = preset_config.get("workflow", {}) 
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract and normalize audio
+    audio_path = get_audio_from_input(input_file, output_dir)
+    
+    results = {
+        "input_file": input_file,
+        "output_dir": output_dir,
+        "preset": preset_name,
+        "audio_path": audio_path,
+        "processing_time": datetime.datetime.now().isoformat(),
+        "device": device
+    }
+    
+    # Event detection (if enabled)
+    if workflow.get("detect_events"):
+        logging.info("Detecting events in audio...")
+        
+        # Get config, using defaults if sections or keys are missing
+        event_config = preset_config.get("event_detection", {})
+        target_events = event_config.get("target_events") # Get configured events
+        threshold = event_config.get("threshold", 0.98) # Use config threshold or default
+        # Use min_duration from config as it's named there, default to 1.0
+        min_gap = event_config.get("min_duration", 1.0) 
+
+        # Use default prompts if the config list is empty or None
+        if not target_events:
+            logging.warning("No target events specified in config, using default events.")
+            target_events = DEFAULT_EVENTS # Use imported defaults
+            
+        logging.info(f"Using target events: {target_events}") # Log which events are used
+
+        event_results = detect_and_save_events(
+            audio_path=audio_path,
+            output_dir=output_dir,
+            target_events=target_events, # Pass the final (possibly defaulted) list
+            threshold=threshold,
+            min_gap=min_gap # Pass the correctly retrieved min_gap
+        )
+
+        results["events"] = event_results
+        
+        if stop_event and stop_event.is_set():
+            return {"status": "cancelled", **results}
+    
+    # Vocal separation (if enabled)
+    if workflow.get("separate_vocals"):
+        logging.info("Separating vocals from audio...")
+        
+        # First separate vocals using demucs
+        vocals_path, nonvocals_path = separate_vocals_with_demucs(
+            input_audio=audio_path,
+            output_dir=output_dir
+        )
+        
+        if vocals_path and nonvocals_path:
+            # Create audio segments
+            vocals = AudioSegment.from_file(vocals_path)
+            nonvocals = AudioSegment.from_file(nonvocals_path)
+            
+            # Export segments
+            base_name = os.path.splitext(os.path.basename(audio_path))[0]
+            vocal_path, nonvocal_path = export_audio_segments(
+                audio_segments=[vocals, nonvocals],
+                output_dir=output_dir,
+                base_name=base_name
+            )
+            
+            results["vocal_path"] = vocal_path
+            results["nonvocal_path"] = nonvocal_path
+        
+        if stop_event and stop_event.is_set():
+            return {"status": "cancelled", **results}
+    
+    # Transcription (if enabled)
+    if workflow.get("transcribe"):
+        logging.info("Transcribing audio...")
+        
+        # Load Whisper model
+        model = whisper.load_model("medium", device=device)
+        
+        # Use events to guide transcription if available
+        if workflow.get("use_events_for_transcription") and "events" in results and results["events"]:
+            segments = []
+            logging.info("Using detected events to guide transcription.")
+            # results["events"] is Dict[str, List[Dict]]
+            # Iterate through the lists of detections for relevant event types
+            for event_type in ["speech", "conversation"]:
+                if event_type in results["events"]:
+                    for event in results["events"][event_type]: # Iterate list of detections
+                        try:
+                            # Check event structure (basic)
+                            if not all(k in event for k in ['start', 'end', 'type', 'confidence']):
+                                logging.warning(f"Skipping malformed event dict: {event}")
+                                continue
+                                
+                            # event["type"] should match event_type, but double-check
+                            if event["type"] == event_type: 
+                                # Transcribe speech segments
+                                segment_start = event["start"]
+                                segment_end = event["end"]
+                                
+                                # Ensure start/end are valid numbers and end > start
+                                if not (isinstance(segment_start, (int, float)) and 
+                                        isinstance(segment_end, (int, float)) and 
+                                        segment_end > segment_start):
+                                    logging.warning(f"Skipping event with invalid times: start={segment_start}, end={segment_end}")
+                                    continue
+
+                                logging.debug(f"Transcribing segment for event: {event_type} from {segment_start:.2f}s to {segment_end:.2f}s")
+
+                                # Load audio segment safely
+                                try:
+                                    # Add a small buffer in case times are exact boundaries
+                                    audio_segment = AudioSegment.from_file(audio_path)[
+                                        int(segment_start * 1000 - 10):int(segment_end * 1000 + 10)
+                                    ]
+                                except Exception as load_err:
+                                     logging.error(f"Error loading audio segment ({segment_start:.2f}s-{segment_end:.2f}s): {load_err}")
+                                     continue # Skip this event if audio fails to load
+
+                                # Convert to numpy array
+                                # Ensure mono for Whisper if needed (model expects mono)
+                                if audio_segment.channels > 1:
+                                    audio_segment = audio_segment.set_channels(1)
+                                samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32) / 32768.0
+                                
+                                # Transcribe segment
+                                result = model.transcribe(samples)
+                                transcript_text = result["text"].strip()
+
+                                if transcript_text:
+                                    segments.append({
+                                        "start": segment_start,
+                                        "end": segment_end,
+                                        "text": transcript_text,
+                                        "source_event_type": event_type,
+                                        "source_event_confidence": event['confidence']
+                                    })
+                                else:
+                                    logging.debug(f"Segment {segment_start:.2f}s-{segment_end:.2f}s resulted in empty transcription.")
+                        except Exception as e:
+                            logging.error(f"Error processing event {event}: {e}", exc_info=True)
+                            continue # Skip to next event on error
+                else:
+                     logging.info(f"No events of type '{event_type}' found for guided transcription.")
+
+            if segments:
+                 # Sort final segments by start time
+                 segments.sort(key=lambda x: x['start'])
+                 results["transcription"] = {
+                     "segments": segments,
+                     "text": " ".join(seg["text"] for seg in segments)
+                 }
+                 logging.info(f"Generated {len(segments)} transcript segments based on detected events.")
+            else:
+                 logging.warning("Event-guided transcription enabled, but no valid speech/conversation events found or transcribed. Falling back to full transcription.")
+                 # Fallback to full transcription if no segments were generated
+                 result = model.transcribe(audio_path)
+                 results["transcription"] = result
+
+        else:
+            # Regular full transcription (if not event-guided or no events found)
+            # Check if transcription already exists from fallback
+            if "transcription" not in results:
+                logging.info("Performing full transcription.")
+                result = model.transcribe(audio_path)
+                results["transcription"] = result
+            else:
+                 logging.info("Skipping full transcription as event-guided fallback already ran.")
+
+        if stop_event and stop_event.is_set():
+            return {"status": "cancelled", **results}
+    
+    # Sound detection (if enabled)
+    if workflow.get("detect_sounds"):
+        logging.info("Detecting sounds in audio...")
+
+        # Determine audio path (use original or separated vocals)
+        sound_detection_audio_path = audio_path
+        if workflow.get("separate_vocals") and results.get("vocal_path"):
+            # Optional: Could add logic to detect on non-vocals if desired
+            sound_detection_audio_path = results["vocal_path"] 
+            logging.info(f"Running sound detection on separated vocal track: {sound_detection_audio_path}")
+        else:
+            logging.info(f"Running sound detection on original audio track: {sound_detection_audio_path}")
+
+        # Get config for sound detection
+        sound_config = preset_config.get("sound_detection", {})
+        target_prompts = sound_config.get("target_prompts") # Use the key set in presets.py
+        threshold = sound_config.get("threshold", DEFAULT_CALL_THRESHOLD) # Use imported default
+        chunk_duration_s = sound_config.get("chunk_duration_s", DEFAULT_CALL_CHUNK_DURATION) # Use imported default
+
+        # Default prompts if needed
+        if not target_prompts:
+            logging.warning("No target prompts specified for sound detection, using defaults.")
+            target_prompts = TARGET_SOUND_PROMPTS # Use imported default
+
+        logging.info(f"Using sound detection prompts: {target_prompts}")
+
+        detected_sounds = detect_sound_events(
+            audio_path=sound_detection_audio_path,
+            chunk_duration_s=chunk_duration_s,
+            threshold=threshold,
+            target_prompts=target_prompts # Pass the final list
+        )
+
+        results["detected_sounds"] = detected_sounds
+        
+        # Cut audio at detected sounds
+        if detected_sounds:
+            cut_segments = cut_audio_at_detections(
+                audio_path=audio_path,
+                detected_events=detected_sounds,
+                output_dir=output_dir
+            )
+            
+            results["cut_segments"] = cut_segments
+            
+        if stop_event and stop_event.is_set():
+            return {"status": "cancelled", **results}
+    
+    # Save results
+    results_path = os.path.join(output_dir, "results.yaml")
+    with open(results_path, "w") as f:
+        yaml.dump(results, f)
+        
+    results["status"] = "completed"
+    return results
 
 def copy_final_outputs(temp_dir, final_output_dir):
     """Copy only the final output files to the final output directory."""
@@ -1118,75 +1049,83 @@ def main():
     parser.add_argument('--output_dir', type=str, required=True, help='Directory to save output files.')
     parser.add_argument('--model', type=str, default="base", help='Whisper model to use (default: base).')
     parser.add_argument('--num_speakers', type=int, default=2, help='Number of speakers for diarization (default: 2).')
-    parser.add_argument('--auto_speakers', action='store_true', help='Automatically detect optimal speaker count (Default: Disabled).')
+    parser.add_argument('--auto_speakers', action='store_true', help='Automatically detect optimal speaker count.')
     parser.add_argument('--enable_vocal_separation', action='store_true', help='Enable vocal separation using Demucs.')
     parser.add_argument('--enable_word_extraction', action='store_true', help='Enable extraction of individual word audio snippets.')
-    parser.add_argument('--enable_second_pass', action='store_true', help='Enable second pass diarization for refinement (experimental).')
-    parser.add_argument('--second_pass_min_duration', type=float, default=5.0, help='Minimum segment duration (seconds) to consider for second pass refinement (default: 5.0).')
+    parser.add_argument('--enable_second_pass', action='store_true', help='Enable second pass diarization for refinement.')
+    parser.add_argument('--second_pass_min_duration', type=float, default=5.0, help='Minimum segment duration (seconds) for second pass refinement.')
     parser.add_argument('--split_stereo', action='store_true', help='Process left and right channels separately if input is stereo.')
-    parser.add_argument('--attempt_sound_detection', action='store_true', help='Enable sound detection using CLAP (requires --enable_vocal_separation).')
-    parser.add_argument('--clap_chunk_duration', type=float, default=5.0, help='Chunk duration in seconds for CLAP processing (default: 5.0).')
-    parser.add_argument('--clap_threshold', type=float, default=0.7, help='Confidence threshold for CLAP sound detection (0.0-1.0, default: 0.7).')
-    parser.add_argument('--clap_target_prompts', type=str, default=None, help='Comma-separated list of custom text prompts for CLAP sound detection (e.g., "dial tone,telephone ringing"). Overrides defaults.')
-    parser.add_argument('--force_mono_output', action='store_true', help='Force output audio snippets (speaker segments, words) to be mono.')
+    
+    # Call detection and processing options
+    parser.add_argument('--clap_chunk_duration', type=float, default=5.0, help='Chunk duration in seconds for CLAP processing.')
+    parser.add_argument('--clap_threshold', type=float, default=0.7, help='Confidence threshold for CLAP call detection (0.0-1.0).')
+    parser.add_argument('--clap_target_prompts', type=str, help='Comma-separated list of custom text prompts for call detection.')
+    parser.add_argument('--disable_auto_cutting', action='store_true', help='Disable automatic cutting at detected call boundaries.')
+    parser.add_argument('--save_cut_nonvocal_track', action='store_true', help='Save the cut non-vocal track segments.')
+    
+    # Output options
+    parser.add_argument('--force_mono_output', action='store_true', help='Force output audio snippets to be mono.')
+    parser.add_argument('--processing_mode', type=str, default="Call Analysis", 
+                       choices=["Call Analysis", "Standard Processing"],
+                       help='Select the overall processing workflow.')
+    
     args = parser.parse_args()
 
-    # Restore original input validation
+    # Input validation
     if not any([args.input_dir, args.input_file, args.url]):
         logging.error("Please provide one of --input_dir, --input_file, or --url.")
         parser.print_help()
         sys.exit(1)
-    # Ensure only one input type is provided (optional, but good practice)
+
+    # Ensure only one input type is provided
     input_args = [args.input_dir, args.input_file, args.url]
     if sum(1 for arg in input_args if arg is not None) > 1:
-         logging.error("Please provide only one type of input: --input_dir, --input_file, or --url.")
-         parser.print_help()
-         sys.exit(1)
+        logging.error("Please provide only one type of input: --input_dir, --input_file, or --url.")
+        parser.print_help()
+        sys.exit(1)
 
-    # Restore original input path determination logic
-    # Specific output dir determination remains inside process_audio
+    # Determine input path
     input_path_for_processing = None
     if args.url:
-        # For CLI, download first to a temp/output location, then pass the file path.
-        download_target_dir = os.path.join(args.output_dir, "downloads") # Download to a subdir
+        download_target_dir = os.path.join(args.output_dir, "downloads")
         os.makedirs(download_target_dir, exist_ok=True)
         try:
             logging.info(f"Downloading audio from {args.url} to {download_target_dir}")
             input_path_for_processing = download_audio(args.url, download_target_dir)
             if not input_path_for_processing:
-                 raise ValueError("download_audio failed to return a valid path.")
+                raise ValueError("download_audio failed to return a valid path.")
         except Exception as e:
             logging.error(f"Failed to download URL {args.url}: {e}")
             sys.exit(1)
     elif args.input_dir:
-        input_path_for_processing = args.input_dir # Pass the directory path
-    else: # Must be input_file
+        input_path_for_processing = args.input_dir
+    else:
         input_path_for_processing = args.input_file
 
-    # Final check on the path before processing
+    # Final path check
     if not input_path_for_processing or not os.path.exists(input_path_for_processing):
         logging.error(f"Input path does not exist or could not be determined: {input_path_for_processing}")
         sys.exit(1)
-    # No isfile check here, allow directories to be passed
 
-    # Call process_audio with the determined path and the main output dir
+    # Process audio with the determined path
     process_audio(
-        input_path=input_path_for_processing, 
+        input_file=input_path_for_processing,
         output_dir=args.output_dir,
-        model_name=args.model,
-        enable_vocal_separation=args.enable_vocal_separation,
-        num_speakers=args.num_speakers,
-        auto_speakers=args.auto_speakers,
-        enable_word_extraction=args.enable_word_extraction,
-        enable_second_pass=args.enable_second_pass,
-        second_pass_min_duration=args.second_pass_min_duration,
-        attempt_sound_detection=args.attempt_sound_detection,
-        split_stereo=args.split_stereo,
-        input_url=args.url,
-        clap_chunk_duration=args.clap_chunk_duration,
-        clap_threshold=args.clap_threshold,
-        clap_target_prompts=args.clap_target_prompts,
-        force_mono_output=args.force_mono_output
+        preset_name="Default",
+        preset_config={
+            "name": "Default",
+            "workflow": {
+                "detect_events": True,
+                "event_types": ["speech", "conversation"],
+                "event_threshold": 0.98,
+                "min_event_gap": 1.0,
+                "separate_vocals": True,
+                "transcribe": True,
+                "use_events_for_transcription": True,
+                "detect_sounds": True
+            }
+        },
+        stop_event=None
     )
 
 if __name__ == "__main__":

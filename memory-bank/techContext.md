@@ -45,7 +45,79 @@
     *   `--enable_vocal_separation`: Toggle Demucs vocal separation (default: off).
     *   **`--split_stereo`**: Process L/R channels separately if input is stereo (default: off).
     *   **`--attempt_sound_detection`**: Toggle CLAP-based sound detection (default: off).
-*   **Output Format:** **Master transcript is now `master_transcript.yaml`, containing metadata and structured segment data (potentially nested or split by channel).**
+*   **Output Format:** **Master transcript is `master_transcript.yaml`, containing metadata and structured segment data. Outputs are organized into a unique, timestamped directory per run, with step-specific subdirectories (e.g., `normalized/`, `demucs/`, `speakers/`, `events/`).**
 *   Speaker Labels: Format is `S0`, `S1`, etc. **If `--split_stereo` is used, labels become `S0_L`, `S0_R`, etc.**
-*   **Sound Detection:** Uses **CLAP model** from `transformers` to compare audio embeddings against text prompts for target sounds (e.g., "telephone ringing").
+*   **Sound Detection:** Uses **CLAP model** from `transformers` to compare audio embeddings against text prompts for target sounds.
+*   **Event Detection:** Also uses **CLAP model** for detecting broader event categories.
 *   Some internal parameters in `whisperBite.py`
+
+# Technical Context
+
+## Core Technologies
+
+### Machine Learning Models
+1. **Whisper** (openai-whisper>=20231117)
+   - Speech recognition and transcription
+   - Multiple model sizes supported
+   - Word-level timestamp capability
+
+2. **Pyannote Audio** (pyannote.audio>=3.1.1)
+   - Speaker diarization
+   - Automatic speaker count detection
+   - Pipeline-based processing
+
+3. **CLAP** (via transformers>=4.35.2)
+   - Sound event detection
+   - Custom prompt support
+   - High-confidence detection thresholds
+
+### Audio Processing
+1. **PyDub** (pydub>=0.25.1)
+   - Audio file manipulation
+   - Format conversion
+   - Channel splitting
+
+2. **FFmpeg** (ffmpeg-python>=0.2.0)
+   - Audio extraction from video
+   - Audio normalization
+   - Format conversion
+
+3. **Demucs** (demucs>=4.0.0)
+   - Optional vocal separation
+   - Enhanced sound detection
+
+### Dependencies
+```
+gradio>=3.50.0          # Web UI
+torch>=2.1.0           # Deep learning backend
+torchaudio>=2.1.0      # Audio processing
+librosa>=0.10.1        # Audio analysis
+numpy>=1.24.3          # Numerical operations
+soundfile>=0.12.1      # Audio file handling
+scipy>=1.11.4          # Signal processing
+PyYAML>=6.0.1         # Output formatting
+yt-dlp>=2023.12.30    # URL downloading
+```
+
+## Technical Constraints
+
+### Hardware Requirements
+- GPU recommended for optimal performance
+- Sufficient RAM for audio processing (8GB minimum)
+- Adequate storage for temporary files and outputs
+
+### Processing Limitations
+- Maximum audio file size dependent on available memory
+- Processing time scales with audio length and model size
+- Second pass diarization increases processing time
+
+### Input/Output
+- Supported input formats: wav, mp3, m4a, flac, aac, mp4, mov, avi, mkv, webm
+- Output format: WAV for audio segments
+- Structured YAML for metadata and transcriptions
+
+## Development Setup
+1. Python 3.8+ required
+2. CUDA toolkit for GPU support
+3. FFmpeg installation required
+4. Virtual environment recommended

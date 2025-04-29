@@ -1,17 +1,42 @@
-# Project Brief
+# WhisperBite Project Brief
 
-WhisperBite provides a comprehensive audio processing pipeline, accessible via a **Gradio web UI (`app.py`)** and a core script (`whisperBite.py`), focused on generating detailed, speaker-separated transcriptions from audio **and video** files.
+## Project Overview
+WhisperBite is an advanced audio processing tool that combines speaker diarization, transcription, and sound event detection capabilities. It processes audio/video files to produce detailed transcriptions with speaker identification and optional sound event detection.
 
-Core goals:
-1.  Accept various inputs (local audio/video files, directories [newest file], URLs) through the UI or script.
-2.  **Automatically extract audio from video inputs using ffmpeg.**
-3.  Identify and separate different speakers in the audio (diarization).
-4.  **Optionally improve speaker separation accuracy via a second-pass analysis (`--enable_second_pass`).**
-5.  Transcribe the speech for each speaker accurately using OpenAI's Whisper.
-6.  Provide word-level timestamps and extract individual word audio snippets (**optional, `--enable_word_extraction`, default off**).
-7.  Optionally enhance audio quality through normalization and vocal separation.
-8.  **Optionally detect non-speech sounds (if vocal separation is enabled).**
-9.  Produce structured output including transcripts (with formatted speaker labels `S0`, `S1`, etc., and sound events), segmented audio, and word data, accessible via download in the UI or directly in the filesystem.
-10. Offer a user-friendly web interface for configuration and execution (with manual speaker count as default).
+## Core Requirements
+1. Audio Processing
+   - Support for various audio/video input formats
+   - Automatic audio extraction from video files
+   - Audio normalization and quality optimization
+   - Optional stereo channel splitting
 
-[The foundational document. Define core requirements and goals. Source of truth for project scope.] 
+2. Speaker Diarization
+   - Accurate speaker separation using pyannote.audio
+   - Support for automatic speaker count detection
+   - Optional second pass refinement for improved accuracy
+   - Stereo channel-specific processing capability
+
+3. Transcription
+   - High-quality transcription using OpenAI's Whisper
+   - Support for multiple Whisper models
+   - Word-level timestamp extraction
+   - Individual word audio snippet extraction
+
+4. Sound Detection
+   - CLAP-based sound event detection
+   - Support for custom sound prompts
+   - Vocal cue detection capability
+   - Automatic audio cutting at detected events
+
+5. Output Generation
+   - Structured YAML output with metadata
+   - Organized directory structure for outputs
+   - Relative path handling for portability
+   - Results compression for easy sharing
+
+## Project Goals
+1. Provide accurate and reliable audio transcription with speaker identification
+2. Enable flexible processing workflows for different use cases
+3. Maintain high performance and efficient resource usage
+4. Ensure robust error handling and logging
+5. Support extensibility for future enhancements 

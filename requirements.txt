@@ -1,16 +1,19 @@
-gradio
-openai-whisper
-pyannote.audio>=3.0 # Specify >=3.0 for potential Hugging Face API changes
-torch # Note: Specific version might be needed depending on CUDA setup and other libraries
-torchaudio
-pydub
-demucs # For optional vocal separation
-yt-dlp # For URL downloading
+gradio>=3.50.0
+openai-whisper>=20231117
+pyannote.audio>=3.1.1
+torch>=2.1.0
+torchaudio>=2.1.0
+pydub>=0.25.1
+demucs>=4.0.0 # For optional vocal separation
+yt-dlp>=2023.12.30 # For URL downloading
 
 # Dependencies for Sound Event Detection (CLAP) & Whisper/Pyannote Backends
-transformers # For CLAP model
-librosa # Handles audio loading/resampling for CLAP and others
-# soundfile - Usually installed as a dependency by librosa/torch
+transformers>=4.35.2
+librosa>=0.10.1
+numpy>=1.24.3
+soundfile>=0.12.1
 
 # YAML Output
-PyYAML 
+PyYAML>=6.0.1
+ffmpeg-python>=0.2.0
+scipy>=1.11.4 

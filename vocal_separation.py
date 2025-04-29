@@ -156,3 +156,23 @@ def enhance_vocals(vocals_file, output_dir):
     except Exception as e:
         logging.warning(f"Error enhancing vocals: {e}. Using original vocals.")
         return vocals_file
+
+def export_audio_segments(audio_segments, output_dir, base_name, sample_rate=48000):
+    """Export audio segments to WAV files."""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Export vocals
+    vocals_path = os.path.join(output_dir, f"{base_name}_vocals.wav")
+    audio_segments[0].export(vocals_path, format="wav", parameters=[
+        "-ar", str(sample_rate),
+        "-acodec", "pcm_s16le"
+    ])
+    
+    # Export non-vocals (instrumental/background)
+    no_vocals_path = os.path.join(output_dir, f"{base_name}_no_vocals.wav")
+    audio_segments[1].export(no_vocals_path, format="wav", parameters=[
+        "-ar", str(sample_rate),
+        "-acodec", "pcm_s16le"
+    ])
+    
+    return vocals_path, no_vocals_path

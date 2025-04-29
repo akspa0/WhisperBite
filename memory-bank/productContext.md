@@ -1,5 +1,98 @@
 # Product Context
 
+## Purpose
+WhisperBite addresses the need for sophisticated audio processing in various domains:
+1. **Call Analysis**
+   - Automated call segmentation
+   - Call content transcription
+   - Call event detection
+
+2. **Audio Processing**
+   - Multi-track handling
+   - Vocal separation
+   - Sound event detection
+
+3. **Content Organization**
+   - Call-based segmentation
+   - Structured metadata
+   - Multi-track preservation
+
+## Problem Space
+
+### Core Problems Solved
+1. **Call Processing Complexity**
+   - Manual call separation
+   - Call boundary identification
+   - Multi-track coordination
+
+2. **Audio Analysis Challenges**
+   - Track synchronization
+   - Timing preservation
+   - Quality optimization
+
+3. **Content Organization**
+   - Call-based structuring
+   - Track relationship management
+   - Metadata organization
+
+### User Experience Goals
+
+1. **Efficiency**
+   - Automated call detection
+   - Streamlined processing
+   - Organized output
+
+2. **Accuracy**
+   - Precise call boundaries
+   - Clean vocal processing
+   - Accurate transcription
+
+3. **Flexibility**
+   - Optional track preservation
+   - Configurable processing via presets
+   - **Separate configuration for Event/Sound detection**
+   - Customizable output (YAML structure)
+
+4. **Usability & Traceability**
+- Clear workflow via UI Tabs (Input, Processing, Detection)
+- Intuitive organization of options
+- Accessible results through organized outputs
+- **Detailed, traceable output structure:** Unique timestamped run directory with subfolders for each processing step (`normalized/`, `demucs/`, `events/`, `sounds/`, etc.).
+
+## Use Cases
+
+### 1. Call Center Analysis
+- Call segmentation
+- Content transcription
+- Event detection
+
+### 2. Audio Processing
+- Track separation
+- Content analysis
+- Quality optimization
+
+### 3. Content Management
+- Call organization
+- Track preservation
+- Metadata management
+
+## Success Metrics
+
+### 1. Processing Accuracy
+- Call boundary precision
+- Transcription quality
+- Event detection accuracy
+
+### 2. Efficiency
+- Processing speed
+- Resource utilization
+- Output organization
+
+### 3. Usability
+- Workflow clarity
+- Result accessibility
+- Configuration ease
+
 **Problem:** Analyzing spoken audio, especially conversations with multiple speakers, is time-consuming. **Getting audio from video files requires extra steps.** Manually transcribing, identifying who said what, and finding specific words is inefficient. Furthermore, automated speaker diarization isn't always perfect and can sometimes group speech from multiple speakers into a single segment.
 
 **Solution:** WhisperBite automates this process via a user-friendly web interface (`app.py`) or a command-line tool (`whisperBite.py`). It accepts **audio or video files**, URLs, or folders (processing the newest compatible file within). **For video inputs, it automatically extracts the audio** before performing diarization and transcription.

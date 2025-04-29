@@ -8,192 +8,209 @@ from utils import download_audio
 import logging # Add logging
 import traceback # Add traceback
 import re
+import threading
+import queue
+import yaml
+from typing import Dict, Any, Optional, List
+from presets import (
+    get_standard_preset,
+    get_transcription_preset,
+    get_event_guided_preset
+)
 
 # Configure basic logging for the app
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
-def run_pipeline(input_file, input_folder, url, output_folder, model, num_speakers, 
-                auto_speakers, enable_vocal_separation, 
-                enable_word_extraction, enable_second_pass, 
-                second_pass_min_duration,
-                attempt_sound_detection,
-                hf_token,
-                split_stereo,
-                clap_chunk_duration,
-                clap_threshold,
-                clap_target_prompts,
-                force_mono_output):
-    """Run the audio processing pipeline based on user inputs."""
-    logging.info("Starting pipeline run...")
-    # Set Hugging Face token if provided
-    if hf_token:
-        logging.info("Setting HF_TOKEN environment variable.")
-        os.environ['HF_TOKEN'] = hf_token
-    else:
-        logging.warning("HF_TOKEN not provided. Diarization may fail.")
-        # Optionally return an error early if the token is strictly required
-        # return "Error: Hugging Face Token is required for diarization.", None, ""
+# Global variables for job control
+current_job: Optional[threading.Thread] = None
+job_queue = queue.Queue()
+stop_requested: bool = False
+processing_stop_event: Optional[threading.Event] = None
 
-    if not os.path.exists(output_folder):
-        logging.info(f"Creating output directory: {output_folder}")
-        os.makedirs(output_folder, exist_ok=True)
+def stop_current_job() -> None:
+    """Request the current job to stop."""
+    global stop_requested, processing_stop_event
+    if current_job and current_job.is_alive():
+        logger.info("Stop requested")
+        stop_requested = True
+        if processing_stop_event:
+            processing_stop_event.set()
+        return "Stop requested. The current job will terminate at the next safe point."
+    return "No job is currently running."
 
-    # Determine input source (Restore folder logic)
-    input_path = None
-    source_type = ""
-    if url:
-        logging.info(f"Processing URL: {url}")
-        try:
-            # Use a temporary directory within the output folder for downloads
+def run_pipeline(
+    input_file: str,
+    output_dir: str,
+    preset_name: str,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Run the audio processing pipeline with the selected preset.
+    
+    Args:
+        input_file: Path to input audio/video file
+        output_dir: Directory to save outputs
+        preset_name: Name of the preset to use
+        **kwargs: Additional arguments to pass to the preset
+    
+    Returns:
+        Dict containing processing results and output paths
+    """
+    global current_job, stop_requested, processing_stop_event
+    stop_requested = False
+    processing_stop_event = threading.Event()
+    
+    try:
+        # Get preset configuration
+        preset_funcs = {
+            "Standard": get_standard_preset,
+            "Transcription": get_transcription_preset,
+            "Event-Guided": get_event_guided_preset
+        }
+        
+        if preset_name not in preset_funcs:
+            raise ValueError(f"Unknown preset: {preset_name}")
+            
+        preset = preset_funcs[preset_name](**kwargs)
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save preset configuration
+        config_path = os.path.join(output_dir, "config.yaml")
+        with open(config_path, "w") as f:
+            yaml.dump(preset, f)
+            
+        # Process audio with preset configuration
+        results = process_audio(
+            input_file=input_file,
+            output_dir=output_dir,
+            preset_name=preset_name,
+            preset_config=preset["config"],
+            stop_event=processing_stop_event
+        )
+        
+        # Check if stopped after process_audio returned
+        if stop_requested:
+             logger.info("Pipeline stopped after process_audio completed.")
+             # Decide how to handle this - maybe return a specific stopped status
+             # For now, treat as success but maybe add a note
+             results['status'] = 'stopped_post_processing'
+
+        return {
+            "status": "success",
+            "preset_used": preset_name,
+            "config_file": config_path,
+            **results
+        }
+        
+    except Exception as e:
+        logger.exception("Error in processing pipeline")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+def process_wrapper(
+    input_file,
+    input_folder,
+    url,
+    output_folder,
+    model,
+    num_speakers,
+    auto_speakers,
+    enable_vocal_separation,
+    enable_word_extraction,
+    enable_second_pass,
+    second_pass_min_duration,
+    attempt_sound_detection,
+    hf_token,
+    split_stereo,
+    clap_chunk_duration,
+    clap_threshold,
+    clap_target_prompts,
+    force_mono_output,
+    preset
+):
+    """Wrapper function to handle Gradio interface inputs."""
+    try:
+        # Determine input file path
+        if input_file is not None:
+            file_path = input_file.name
+        elif input_folder:
+            # Get newest file from folder
+            files = [(os.path.getmtime(os.path.join(input_folder, f)), os.path.join(input_folder, f))
+                    for f in os.listdir(input_folder)]
+            if not files:
+                return {"status": "error", "error": "No files found in input folder"}
+            file_path = max(files)[1]
+        elif url:
+            # Download from URL
             download_dir = os.path.join(output_folder, "downloads")
             os.makedirs(download_dir, exist_ok=True)
-            input_path = download_audio(url, download_dir)
-            source_type = "URL"
-            if not input_path:
-                 raise ValueError("Download failed or returned no path.")
-            logging.info(f"Downloaded audio to: {input_path}")
-        except Exception as download_err:
-            logging.error(f"Error downloading URL {url}: {download_err}")
-            return f"Error downloading URL: {str(download_err)}", None, ""
-    elif input_file is not None:
-        input_path = input_file.name # Use .name attribute for Gradio File component
-        logging.info(f"Processing uploaded file: {input_path}")
-        source_type = "File"
-    elif input_folder and os.path.isdir(input_folder):
-        input_path = input_folder
-        logging.info(f"Processing folder: {input_path}")
-        source_type = "Folder"
-    elif input_folder: # Handle case where input_folder is provided but not a valid directory
-        logging.error(f"Input folder path is not a valid directory: {input_folder}")
-        return f"Error: Input folder path is not a valid directory: {input_folder}", None, ""
-    else:
-        logging.warning("No valid input provided (file, folder, or URL).")
-        return "Please provide an input file, folder, or URL.", None, "" 
+            file_path = download_audio(url, download_dir)
+            if not file_path:
+                return {"status": "error", "error": "Failed to download audio from URL"}
+        else:
+            return {"status": "error", "error": "Please provide an input file, folder, or URL"}
 
-    if not input_path:
-        logging.error("Input path could not be determined.")
-        return "Error determining input path.", None, ""
-        
-    logging.info(f"Final input path for processing: {input_path}")
+        # Prepare kwargs for preset configuration
+        preset_kwargs = {
+            "model": model,
+            "num_speakers": num_speakers,
+            "auto_speakers": auto_speakers,
+            "enable_vocal_separation": enable_vocal_separation,
+            "enable_word_extraction": enable_word_extraction,
+            "enable_second_pass": enable_second_pass,
+            "second_pass_min_duration": second_pass_min_duration,
+            "attempt_sound_detection": attempt_sound_detection,
+            "hf_token": hf_token,
+            "split_stereo": split_stereo,
+            "clap_chunk_duration": clap_chunk_duration,
+            "clap_threshold": clap_threshold,
+            "clap_target_prompts": clap_target_prompts.split(",") if clap_target_prompts else None,
+            "force_mono_output": force_mono_output
+        }
 
-    # Run the processing pipeline
-    try:
-        logging.info(f"Calling process_audio with options: model={model}, num_speakers={num_speakers}, auto={auto_speakers}, separation={enable_vocal_separation}, words={enable_word_extraction}, second_pass={enable_second_pass}, sound_detect={attempt_sound_detection}, split_stereo={split_stereo}, clap_chunk={clap_chunk_duration}, clap_thresh={clap_threshold}, force_mono={force_mono_output}")
-        # Pass the new arguments
-        result_dir = process_audio(
-            input_path=input_path,
+        # Call run_pipeline with the correct arguments
+        results = run_pipeline(
+            input_file=file_path,
             output_dir=output_folder,
-            model_name=model,
-            enable_vocal_separation=enable_vocal_separation,
-            num_speakers=num_speakers,
-            auto_speakers=auto_speakers,
-            enable_word_extraction=enable_word_extraction,
-            enable_second_pass=enable_second_pass,
-            second_pass_min_duration=second_pass_min_duration,
-            attempt_sound_detection=attempt_sound_detection,
-            split_stereo=split_stereo,
-            clap_chunk_duration=clap_chunk_duration,
-            clap_threshold=clap_threshold,
-            clap_target_prompts=clap_target_prompts,
-            force_mono_output=force_mono_output,
-            input_url=url if source_type == "URL" else None
+            preset_name=preset,
+            **preset_kwargs
         )
-
-        if not result_dir or not os.path.isdir(result_dir):
-            logging.error(f"process_audio did not return a valid directory path. Got: {result_dir}")
-            # Restore folder-specific fallback logic (though whisperBite currently only processes one file)
-            if source_type == "Folder":
-                 # This fallback might be inaccurate if whisperBite changes, but restores previous behavior
-                 result_dir = output_folder 
-                 logging.warning(f"process_audio returned invalid path for folder input. Assuming results are in main output folder: {result_dir}")
-            else:
-                 return "Processing finished, but the result directory was not found.", None, ""
-
-        logging.info(f"Processing finished. Looking for results in: {result_dir}")
-
-        # Find the results zip file and transcript within the specific result directory
-        result_zip_file = None
-        transcript = ""
-        master_transcript_path = os.path.join(result_dir, "master_transcript.txt")
-        second_pass_transcript_path = os.path.join(result_dir, "2nd_pass", "master_transcript.txt")
-
-        # Prefer second pass transcript if it exists
-        transcript_path_to_read = None
-        if enable_second_pass and os.path.exists(second_pass_transcript_path):
-            transcript_path_to_read = second_pass_transcript_path
-            logging.info(f"Using second pass transcript: {transcript_path_to_read}")
-        elif os.path.exists(master_transcript_path):
-            transcript_path_to_read = master_transcript_path
-            logging.info(f"Using first pass transcript: {transcript_path_to_read}")
-        else:
-            logging.warning(f"Master transcript not found in {result_dir}")
-
-        if transcript_path_to_read:
-            try:
-                with open(transcript_path_to_read, 'r', encoding='utf-8') as f:
-                    transcript = f.read()
-            except Exception as read_err:
-                logging.error(f"Error reading transcript file {transcript_path_to_read}: {read_err}")
-                transcript = f"[Error reading transcript: {read_err}]"
-
-        # --- Construct the expected zip file path ---
-        # The zip file is saved in the parent directory of result_dir
-        result_zip_file = None # Initialize to None
-        try:
-            # Extract the base name used for the zip from the result_dir name
-            # Assumes result_dir is like '.../output/INPUT_BASENAME_TIMESTAMP'
-            result_dir_name = os.path.basename(result_dir) # e.g., "INPUT_BASENAME_TIMESTAMP"
-            # Find the last timestamp pattern (e.g., _YYYYMMDD_HHMMSS)
-            timestamp_pattern = r"_(\d{8}_\d{6})$"
-            match = re.search(timestamp_pattern, result_dir_name)
-            if match:
-                original_input_basename = result_dir_name[:match.start()] # Get part before timestamp
-                
-                parent_dir = os.path.dirname(result_dir) # e.g., "./whisper_output"
-                # Reconstruct the zip filename pattern used in utils.zip_results
-                # zip_filename = os.path.join(parent_dir, f"{base_name}_results_{os.path.basename(output_dir)}.zip")
-                expected_zip_filename = f"{original_input_basename}_results_{result_dir_name}.zip"
-                expected_zip_path = os.path.join(parent_dir, expected_zip_filename)
-
-                if os.path.exists(expected_zip_path):
-                    result_zip_file = expected_zip_path
-                    logging.info(f"Found result zip file: {result_zip_file}")
-                else:
-                    logging.warning(f"Expected zip file not found at: {expected_zip_path}")
-            else:
-                logging.warning(f"Could not extract base name and timestamp from result directory: {result_dir_name}. Cannot reliably locate zip file.")
         
-        except Exception as zip_find_err:
-            logging.error(f"Error constructing or finding zip file path: {zip_find_err}")
-        # --- End zip file path construction ---
-
-        results_message = f"Processing complete! Results saved to {result_dir}"
-        
-        # Copy result file to temp dir for Gradio access
-        final_result_path_for_gradio = None
-        if result_zip_file:
-            results_message += f"\nZip file created: {os.path.basename(result_zip_file)}"
-            try:
-                # Create a unique temp dir for this request
-                temp_dir = tempfile.mkdtemp()
-                temp_file_path = os.path.join(temp_dir, os.path.basename(result_zip_file))
-                shutil.copy2(result_zip_file, temp_file_path)
-                final_result_path_for_gradio = temp_file_path
-                logging.info(f"Copied zip to temp location for download: {final_result_path_for_gradio}")
-                 # Consider cleaning up older temp dirs if they accumulate
-            except Exception as copy_err:
-                logging.error(f"Error copying result zip to temp dir: {copy_err}")
-                results_message += f"\nError preparing zip for download: {copy_err}"
-                final_result_path_for_gradio = None # Ensure it's None if copy fails
+        # Process the results for Gradio output
+        if results.get("status") == "error":
+            error_message = results.get("error", "Unknown processing error")
+            return f"Error: {error_message}", None, None # Return 3 values on error
+        elif results.get("status") == "cancelled":
+            return "Processing cancelled.", None, None # Return 3 values on cancel
+        elif results.get("status") == "stopped_post_processing":
+            return "Processing stopped.", None, None # Return 3 values on stop
         else:
-             logging.warning("No result zip file found.")
-             results_message += "\nResult zip file not found."
+            # Success case
+            output_zip = results.get("output_zip_path")
+            master_transcript_path = results.get("master_transcript_path") # Assuming process_audio returns this
+            preview_text = ""
+            if master_transcript_path and os.path.exists(master_transcript_path):
+                try:
+                    with open(master_transcript_path, 'r') as f:
+                        # Limit preview size
+                        preview_text = f.read(2000) 
+                        if len(preview_text) == 2000:
+                            preview_text += "... (truncated)"
+                except Exception as e:
+                    logger.warning(f"Could not read transcript for preview: {e}")
             
-        return results_message, final_result_path_for_gradio, transcript
+            status_message = f"Processing complete. Preset: {results.get('preset_used', 'N/A')}"
+            return status_message, output_zip, preview_text # Return 3 values on success
+
     except Exception as e:
-        logging.error(f"An error occurred during pipeline execution: {e}")
-        logging.error(traceback.format_exc())
-        return f"An error occurred: {str(e)}\n\n{traceback.format_exc()}", None, ""
+        logger.exception("Error in process_wrapper")
+        error_message = str(e)
+        return f"Wrapper Error: {error_message}", None, None # Return 3 values on wrapper error
 
 # Gradio interface
 def build_interface():
@@ -231,122 +248,148 @@ def build_interface():
                 )
                 
             with gr.TabItem("Processing Options"):
-                with gr.Row():
-                    model = gr.Dropdown(
-                        label="Whisper Model", 
-                        choices=["tiny", "base", "small", "medium", "large", "large-v2", "large-v3", "turbo"],
-                        value="turbo", # Default set to turbo
-                        info="Larger models are more accurate but slower"
-                    )
-                    
-                    num_speakers = gr.Slider(
-                        label="Number of Speakers", 
-                        minimum=1, 
-                        maximum=10, 
-                        step=1, 
-                        value=2,
-                        info="Set expected number of speakers. Diarization uses Pyannote (requires HF token)."
-                    )
+                # <<< Add Preset Radio Buttons >>>
+                preset = gr.Dropdown(
+                    choices=["Standard", "Transcription", "Event-Guided"],
+                    value="Standard",
+                    label="Processing Preset"
+                )
                 
-                with gr.Row():
-                    auto_speakers = gr.Checkbox(
-                        label="Auto-detect Speaker Count", 
-                        value=False,
-                        info="Automatically determine optimal speaker count (uses Pyannote, requires HF token)."
-                    )
-                    
-                    enable_vocal_separation = gr.Checkbox(
-                        label="Enable Vocal Separation", 
-                        value=False,
-                        info="Isolate voices from background noise/music (requires Demucs)"
-                    )
-                
-                with gr.Row():
-                    split_stereo = gr.Checkbox(
-                        label="Split Stereo Channels (if stereo input)",
-                        value=False,
-                        info="Process Left and Right channels separately (useful for dual-mono recordings)"
-                    )
-                    force_mono_output = gr.Checkbox(
-                        label="Force Mono Output Snippets",
-                        value=False,
-                        info="Convert all output speaker/word audio files to mono."
-                    )
-                
-                with gr.Row():
-                    enable_word_extraction = gr.Checkbox(
-                        label="Enable Word Audio Extraction", 
-                        value=False,
-                        info="Extract individual word audio snippets (generates many files)"
-                    )
-                    
-                    enable_second_pass = gr.Checkbox(
-                        label="Enable Second Pass Refinement", 
-                        value=False,
-                        info="Perform extra analysis to refine speaker separation (experimental)"
-                    )
+                # Standard Options (potentially hide/show based on mode later)
+                with gr.Group(visible=True) as standard_options_group:
+                    with gr.Row():
+                        model = gr.Dropdown(
+                            label="Whisper Model", 
+                            choices=["tiny", "base", "small", "medium", "large", "large-v2", "large-v3", "turbo"],
+                            value="turbo", # Default set to turbo
+                            info="Larger models are more accurate but slower"
+                        )
+                        
+                        num_speakers = gr.Slider(
+                            label="Number of Speakers", 
+                            minimum=1, 
+                            maximum=10, 
+                            step=1, 
+                            value=2,
+                            info="Set expected number of speakers. Diarization uses Pyannote (requires HF token)."
+                        )
+                    with gr.Row():
+                        auto_speakers = gr.Checkbox(
+                            label="Auto-detect Speaker Count", 
+                            value=False,
+                            info="Automatically determine optimal speaker count (uses Pyannote, requires HF token)."
+                        )
+                        
+                        enable_vocal_separation = gr.Checkbox(
+                            label="Enable Vocal Separation", 
+                            value=False,
+                            info="Isolate voices from background noise/music (required for Call Analysis mode)."
+                        )
+                    with gr.Row():
+                        split_stereo = gr.Checkbox(
+                            label="Split Stereo Channels (if stereo input)",
+                            value=False,
+                            info="Process Left and Right channels separately (useful for dual-mono recordings)"
+                        )
+                        force_mono_output = gr.Checkbox(
+                            label="Force Mono Output Snippets",
+                            value=False,
+                            info="Convert all output speaker/word audio files to mono."
+                        )
+                    with gr.Row():
+                        enable_word_extraction = gr.Checkbox(
+                            label="Enable Word Audio Extraction", 
+                            value=False,
+                            info="Extract individual word audio snippets (generates many files)"
+                        )
+                        
+                        enable_second_pass = gr.Checkbox(
+                            label="Enable Second Pass Refinement", 
+                            value=False,
+                            info="Perform extra analysis to refine speaker separation (experimental)"
+                        )
+                    with gr.Row():
+                        second_pass_min_duration = gr.Slider(
+                            label="Second Pass Min Duration (s)",
+                            minimum=0.5,
+                            maximum=30.0,
+                            step=0.5,
+                            value=5.0,
+                            info="Minimum segment length to consider for second pass refinement",
+                            interactive=True # Start enabled, update based on enable_second_pass
+                        )
+                        
+                        # Sound detection checkbox - interactivity handled later
+                        attempt_sound_detection = gr.Checkbox(
+                            label="Attempt Sound Detection (CLAP)",
+                            value=False,
+                            info="Identify non-speech sounds (requires Vocal Separation)",
+                            interactive=False # Initially disabled
+                        )
 
-                with gr.Row():
-                    second_pass_min_duration = gr.Slider(
-                        label="Second Pass Min Duration (s)",
-                        minimum=0.5,
-                        maximum=30.0,
-                        step=0.5,
-                        value=5.0,
-                        info="Minimum segment length to consider for second pass refinement",
-                        interactive=True # Start enabled, update based on enable_second_pass
-                    )
-                    
-                    # Sound detection checkbox - interactivity handled later
-                    attempt_sound_detection = gr.Checkbox(
-                        label="Attempt Sound Detection (CLAP)",
-                        value=False,
-                        info="Identify non-speech sounds (requires Vocal Separation)",
-                        interactive=False # Initially disabled
-                    )
+                # CLAP Options (Visibility depends on vocal sep & maybe mode later)
+                with gr.Group(visible=True) as clap_options_group: 
+                    with gr.Row():
+                        attempt_sound_detection = gr.Checkbox(
+                            label="Enable Non-Vocal Sound Detection",
+                            value=False,
+                            info="Identify non-speech sounds in the non-vocal track (requires Vocal Separation)",
+                            interactive=False # Still depends on vocal sep
+                        )
+                        enable_vocal_clap = gr.Checkbox(
+                            label="Enable Vocal Sound Detection",
+                            value=False,
+                            info="Identify vocal cues like laughter in the vocal track (requires Vocal Separation)",
+                            interactive=False # Also depends on vocal sep
+                        )
+                    with gr.Row():
+                        clap_chunk_duration = gr.Slider(
+                            label="CLAP Chunk Duration (s)",
+                            minimum=1.0,
+                            maximum=10.0, # Adjust max as needed
+                            step=0.5,
+                            value=5.0,
+                            info="Processing chunk size for CLAP sound detection",
+                            interactive=False # Depends on either CLAP option being enabled
+                        )
+                        clap_threshold = gr.Slider(
+                            label="CLAP Detection Threshold",
+                            minimum=0.1, 
+                            maximum=1.0,
+                            step=0.05,
+                            value=0.7,
+                            info="Confidence threshold for CLAP (higher = stricter)",
+                            interactive=False # Depends on either CLAP option being enabled
+                        )
+                    with gr.Row():
+                        clap_target_prompts = gr.Textbox(
+                            label="CLAP Target Prompts (Optional)",
+                            placeholder="e.g., telephone ringing, dial tone, music, laughter",
+                            info="Comma-separated list. If empty, uses defaults based on enabled detection types.",
+                            lines=1,
+                            interactive=False # Depends on either CLAP option being enabled
+                        )
 
-                # Add CLAP configuration sliders
-                with gr.Row():
-                    clap_chunk_duration = gr.Slider(
-                        label="CLAP Chunk Duration (s)",
-                        minimum=1.0,
-                        maximum=10.0, # Adjust max as needed
-                        step=0.5,
-                        value=5.0,
-                        info="Processing chunk size for CLAP sound detection",
-                        interactive=False # Start disabled
-                    )
-                    clap_threshold = gr.Slider(
-                        label="CLAP Detection Threshold",
-                        minimum=0.1, 
-                        maximum=1.0,
-                        step=0.05,
-                        value=0.7,
-                        info="Confidence threshold for CLAP (higher = stricter)",
-                        interactive=False # Start disabled
-                    )
-
-                # Add Textbox for CLAP prompts
-                with gr.Row():
-                    clap_target_prompts = gr.Textbox(
-                        label="CLAP Target Prompts (Optional)",
-                        placeholder="e.g., telephone ringing, dial tone, music",
-                        info="Comma-separated list. If empty, uses defaults.",
-                        lines=1,
-                        interactive=False # Start disabled
-                    )
-
-                hf_token = gr.Textbox(label="Hugging Face Token", type="password", info="Required for speaker diarization. Get token from huggingface.co/settings/tokens.")
-        
-        submit_button = gr.Button("Process Audio", variant="primary")
+                hf_token = gr.Textbox(label="Hugging Face Token", type="password", info="Required for speaker diarization (Standard mode) or Pyannote models. Get token from huggingface.co/settings/tokens.")
         
         with gr.Row():
-            output_message = gr.Textbox(label="Status", interactive=False, lines=3) # Increased lines for better messages
+            submit_button = gr.Button("Process Audio", variant="primary")
+            stop_button = gr.Button("Stop Processing", variant="stop")
+        
+        with gr.Row():
+            output_message = gr.Textbox(label="Status", interactive=False, lines=3)
             result_file = gr.File(label="Download Results")
             transcript_preview = gr.TextArea(label="Transcript Preview", interactive=False, lines=10)
 
+        # Connect the stop button
+        stop_button.click(
+            fn=stop_current_job,
+            inputs=[],
+            outputs=[output_message]
+        )
+
         submit_button.click(
-            fn=run_pipeline,
+            fn=process_wrapper,
             inputs=[
                 input_file, input_folder, url, output_folder, model, 
                 num_speakers, auto_speakers, enable_vocal_separation,
@@ -358,50 +401,54 @@ def build_interface():
                 clap_chunk_duration,
                 clap_threshold,
                 clap_target_prompts,
-                force_mono_output
+                force_mono_output,
+                preset
             ],
             outputs=[output_message, result_file, transcript_preview]
         )
         
-        # Make Sound Detection checkbox interactive only if Vocal Separation is checked
+        # Update interactivity functions
         def update_sound_detection_interactivity(vocal_sep_enabled):
-            # Also resets sound detection value if vocal sep is disabled
-            # Use gr.update() for correct partial updates
+            """Update both CLAP detection checkboxes based on vocal separation."""
             if vocal_sep_enabled:
-                return gr.update(interactive=True)
+                return [
+                    gr.update(interactive=True),  # For non-vocal detection
+                    gr.update(interactive=True)   # For vocal detection
+                ]
             else:
-                return gr.update(interactive=False, value=False)
+                return [
+                    gr.update(interactive=False, value=False),  # For non-vocal detection
+                    gr.update(interactive=False, value=False)   # For vocal detection
+                ]
 
-        # Make CLAP sliders interactive only if Sound Detection is checked
-        # Also handle the prompt textbox
-        def update_clap_config_interactivity(sound_detect_enabled):
-            updated_config = {
-                clap_chunk_duration: gr.Slider(interactive=sound_detect_enabled),
-                clap_threshold: gr.Slider(interactive=sound_detect_enabled),
-                clap_target_prompts: gr.Textbox(interactive=sound_detect_enabled)
-            }
-            # If disabling sound detection, clear the prompts textbox
-            if not sound_detect_enabled:
-                 updated_config[clap_target_prompts] = gr.Textbox(value="", interactive=False)
-                 
-            return updated_config
+        def update_clap_config_interactivity(non_vocal_enabled, vocal_enabled):
+            """Update CLAP configuration controls based on either detection being enabled."""
+            any_clap_enabled = non_vocal_enabled or vocal_enabled
+            return [
+                gr.update(interactive=any_clap_enabled),  # chunk duration
+                gr.update(interactive=any_clap_enabled),  # threshold
+                gr.update(interactive=any_clap_enabled,   # prompts
+                         value="" if not any_clap_enabled else None)  # Clear if disabled
+            ]
 
         def update_second_pass_slider_interactivity(second_pass_enabled):
-            return gr.Slider(interactive=second_pass_enabled)
+            """Update second pass slider interactivity based on checkbox."""
+            return gr.update(interactive=second_pass_enabled)
 
-        # Link vocal separation checkbox to sound detection interactivity
+        # Link vocal separation checkbox to both CLAP detection interactivity
         enable_vocal_separation.change(
             fn=update_sound_detection_interactivity,
             inputs=enable_vocal_separation,
-            outputs=attempt_sound_detection
+            outputs=[attempt_sound_detection, enable_vocal_clap]
         )
 
-        # Link sound detection checkbox to CLAP config interactivity
-        attempt_sound_detection.change(
-            fn=update_clap_config_interactivity,
-            inputs=attempt_sound_detection,
-            outputs=[clap_chunk_duration, clap_threshold, clap_target_prompts] # Update outputs list
-        )
+        # Link both CLAP detection checkboxes to config interactivity
+        for clap_checkbox in [attempt_sound_detection, enable_vocal_clap]:
+            clap_checkbox.change(
+                fn=update_clap_config_interactivity,
+                inputs=[attempt_sound_detection, enable_vocal_clap],
+                outputs=[clap_chunk_duration, clap_threshold, clap_target_prompts]
+            )
 
         # Link second pass checkbox to slider interactivity
         enable_second_pass.change(
