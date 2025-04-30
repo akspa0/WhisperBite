@@ -690,12 +690,15 @@ def detect_sound_events(
     return detected_events
 
 def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]], output_dir: str,
-                           start_types=("telephone ringing",), end_types=("hang-up tones",),
+                           start_types=("telephone ringing",), 
+                           middle_types=("speech", "conversation"),
+                           end_types=("hang-up tones",),
                            min_duration_s=2.0, padding_ms=250) -> List[Dict]:
     """
-    Cuts audio into segments based on sequential pairs of start/end events.
-    Identifies a 'start_type' event and finds the *next* 'end_type' event that occurs after it.
-    Skips any 'end_type' events that occur before the first 'start_type' event.
+    Cuts audio into segments based on sequential triplets of start -> middle -> end events.
+    Identifies a 'start_type' event, finds the *next* 'middle_type' event after it,
+    and then finds the *next* 'end_type' event after the middle event.
+    Skips any 'end_type' or 'middle_type' events that occur before the first valid 'start_type' event.
     Extracts the audio segment from the start of the start_event to the end of the end_event, with padding.
 
     Args:
@@ -704,6 +707,7 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
                                            e.g., {'ringing phone': [...], 'hang-up tones': [...]}.
         output_dir (str): Directory to save the cut conversation segments.
         start_types (tuple): Event types marking the beginning of a desired segment.
+        middle_types (tuple): Event types marking the middle of a desired segment.
         end_types (tuple): Event types marking the end of a desired segment.
         min_duration_s (float): Minimum duration in seconds for a segment to be saved.
         padding_ms (int): Padding in milliseconds added before the start_event and after the end_event.
@@ -712,7 +716,7 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
         List[Dict]: List of dictionaries for each saved segment, containing 
                     {'path': str, 'start': float, 'end': float, 'duration': float}.
     """
-    logger.info(f"Cutting audio based on event pairs: start={start_types}, end={end_types}")
+    logger.info(f"Cutting audio based on event triplets: start={start_types}, middle={middle_types}, end={end_types}")
     os.makedirs(output_dir, exist_ok=True)
     
     all_detected_events = []
@@ -741,15 +745,16 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
          logger.warning("No start events found after skipping initial end events.")
          return []
 
-    # Separate into start and end types *after* potentially skipping initial end events
+    # Separate into start, middle, and end types *after* potentially skipping initial end events
     start_events = [e for e in all_detected_events[first_event_index:] if e['type'] in start_types]
+    middle_events = [e for e in all_detected_events[first_event_index:] if e['type'] in middle_types]
     end_events = [e for e in all_detected_events[first_event_index:] if e['type'] in end_types]
 
-    if not start_events or not end_events:
-        logger.warning("Not enough start or end events found after filtering.")
+    if not start_events or not middle_events or not end_events:
+        logger.warning("Not enough start, middle, or end events found after filtering.")
         return []
 
-    logger.info(f"Found {len(start_events)} potential start events and {len(end_events)} potential end events.")
+    logger.info(f"Found {len(start_events)} potential start, {len(middle_events)} middle, and {len(end_events)} potential end events.")
 
     saved_segments = []
     segment_index = 0
@@ -757,33 +762,50 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
         audio = AudioSegment.from_file(audio_path)
         audio_duration_ms = len(audio)
         
-        # --- Find sequential pairs ---
-        end_event_idx = 0 # Keep track of the search start position for end events
+        # --- Find sequential triplets --- 
+        middle_event_idx = 0 # Search index for middle events
+        end_event_idx = 0    # Search index for end events
 
         # Iterate through start events
         for start_event in start_events:
+            found_middle_event = None
             found_end_event = None
-            # Find the first end event that starts *after* this start event begins
-            # Start searching from the current end_event_idx
-            current_search_idx = end_event_idx
-            while current_search_idx < len(end_events):
-                end_event = end_events[current_search_idx]
-                # Ensure the end event starts AFTER the start event starts
-                if end_event['start'] > start_event['start']: 
-                    found_end_event = end_event
-                    logger.debug(f"Pair found: Start ('{start_event['type']}' at {start_event['start']:.2f}s) -> End ('{end_event['type']}' at {end_event['start']:.2f}s)")
-                    # Update the main end_event_idx to start the *next* search from *after* this found end event
-                    end_event_idx = current_search_idx + 1 
-                    break # Use this end event
-                current_search_idx += 1 # Keep searching if this end event is too early or the same as start
             
-            # If no suitable end event was found for this start event, we are done with start events
+            # --- 1. Find the first middle event after this start event --- 
+            current_middle_search_idx = middle_event_idx
+            while current_middle_search_idx < len(middle_events):
+                middle_event = middle_events[current_middle_search_idx]
+                if middle_event['start'] > start_event['start']:
+                    found_middle_event = middle_event
+                    # Update main index to start next search *after* this middle event
+                    middle_event_idx = current_middle_search_idx + 1
+                    break
+                current_middle_search_idx += 1
+                
+            if not found_middle_event:
+                logger.debug(f"No suitable middle event found after start ('{start_event['type']}' at {start_event['start']:.2f}s). Skipping this start event.")
+                continue # Try the next start event
+                
+            # --- 2. Find the first end event after the found middle event --- 
+            current_end_search_idx = end_event_idx
+            while current_end_search_idx < len(end_events):
+                end_event = end_events[current_end_search_idx]
+                # Ensure end event starts AFTER the middle event starts
+                if end_event['start'] > found_middle_event['start']: 
+                    found_end_event = end_event
+                    logger.debug(f"Triplet found: Start ('{start_event['type']}'@{start_event['start']:.2f}s) -> Middle ('{found_middle_event['type']}'@{found_middle_event['start']:.2f}s) -> End ('{end_event['type']}'@{end_event['start']:.2f}s)")
+                    # Update the main end_event_idx to start the *next* search from *after* this found end event
+                    end_event_idx = current_end_search_idx + 1 
+                    break # Use this end event
+                current_end_search_idx += 1 # Keep searching if this end event is too early
+            
+            # If no suitable end event was found for this start/middle pair, stop searching entirely
+            # as we need sequential triplets.
             if not found_end_event:
-                 logger.debug(f"No suitable end event found after start event '{start_event['type']}' at {start_event['start']:.2f}s. Stopping search.")
-                 break # No more pairs can be formed
+                 logger.debug(f"No suitable end event found after middle event ('{found_middle_event['type']}' at {found_middle_event['start']:.2f}s). Stopping search.")
+                 break # No more triplets can be formed
 
-            # Define cut boundaries with padding
-            # Segment includes the start and end events themselves
+            # --- 3. Extract Segment if triplet found and duration is sufficient --- 
             cut_start_ms = max(0, int(start_event['start'] * 1000) - padding_ms)
             cut_end_ms = min(audio_duration_ms, int(found_end_event['end'] * 1000) + padding_ms)
             
@@ -828,10 +850,10 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
                  break 
 
     except Exception as e:
-        logger.error(f"Error during audio cutting based on event pairs: {e}", exc_info=True)
+        logger.error(f"Error during audio cutting based on event triplets: {e}", exc_info=True)
         return [] # Return empty list on error
 
-    logger.info(f"Finished cutting based on event pairs. Saved {len(saved_segments)} segments.")
+    logger.info(f"Finished cutting based on event triplets. Saved {len(saved_segments)} segments.")
     return saved_segments
 
 def extract_soundbites(segment_audio_path: str, segment_annotations: Dict[str, List[Dict]], 

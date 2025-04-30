@@ -896,19 +896,30 @@ def process_audio(
     conversation_segments = []
     if workflow.get("cut_between_events"):
         if pass1_event_results: 
-            logging.info("--- Cutting audio into conversation segments ---")
+            logging.info("--- Cutting audio into conversation segments using Start->Middle->End logic ---") # Updated log message
             cut_segments_output_dir = os.path.join(output_dir, "conversation_segments")
             os.makedirs(cut_segments_output_dir, exist_ok=True)
             event_config = preset_config.get("event_detection", {})
-            start_types = tuple(t for t in event_config.get("target_events", []) if "ring" in t or "start" in t)
-            end_types = tuple(t for t in event_config.get("target_events", []) if "hang-up" in t or "end" in t)
-            if not start_types: start_types = ("ringing phone",)
-            if not end_types: end_types = ("hang-up tones",)
+            all_target_events = event_config.get("target_events", [])
+            
+            # <<< Define start, middle, and end types based on keywords >>>
+            start_types = tuple(t for t in all_target_events if "ring" in t.lower())
+            middle_types = tuple(t for t in all_target_events if "speech" in t.lower() or "conversation" in t.lower())
+            end_types = tuple(t for t in all_target_events if "hang-up" in t.lower() or "busy" in t.lower() or "dial" in t.lower()) # Include dial/busy as potential ends
+            
+            # Fallback defaults if specific types are missing from config
+            if not start_types: start_types = ("telephone ringing",)
+            if not middle_types: middle_types = ("speech", "conversation")
+            if not end_types: end_types = ("hang-up tones", "busy signal", "dial tone")
+            
+            logging.info(f"Using event types for cutting: Start={start_types}, Middle={middle_types}, End={end_types}")
+            
             conversation_segments = cut_audio_between_events(
                 audio_path=audio_path_for_processing, 
                 all_events=pass1_event_results,
                 output_dir=cut_segments_output_dir,
                 start_types=start_types,
+                middle_types=middle_types, # <<< Pass middle_types >>>
                 end_types=end_types
             )
             results["conversation_segments_info"] = [
@@ -1119,7 +1130,8 @@ def process_audio(
                 logging.info(f"--- Running Diarization & Transcription on segment {idx} ---")
                 try:
                     # Diarization
-                    logging.info(f"Running Pyannote diarization on: {audio_source_for_processing}")
+                    # <<< Add logging to confirm audio source >>>
+                    logger.info(f"Running Pyannote diarization on: {audio_source_for_processing}")
                     num_speakers = preset_config.get("num_speakers", 2)
                     auto_speakers = preset_config.get("auto_speakers", False)
                     actual_num_speakers = num_speakers
@@ -1422,6 +1434,9 @@ def process_audio(
                     
                     # <<< Modify transcription writing for segments >>>
                     transcribed_segments = seg_res.get("transcription_segments", [])
+                    # <<< Add Logging >>>
+                    logger.info(f"Master Transcript: Found {len(transcribed_segments)} transcribed speaker turns for segment {segment_index}.")
+                    
                     if transcribed_segments:
                         # Sort speaker turns by start time within the segment
                         transcribed_segments.sort(key=lambda x: x.get('start', 0))
@@ -1430,9 +1445,15 @@ def process_audio(
                             speaker = ts_seg.get('speaker', 'UNK')
                             seg_start = ts_seg.get('start', 0)
                             seg_end = ts_seg.get('end', 0)
-                            text = ts_seg.get('text', '(No text)')
-                            f.write(f"  [{seg_start:.2f}s - {seg_end:.2f}s] {speaker}: {text.strip()}\\n")
+                            # <<< Handle potentially empty text >>>
+                            text = ts_seg.get('text', '').strip()
+                            if not text:
+                                text = "(Empty transcription)" 
+                                
+                            f.write(f"  [{seg_start:.2f}s - {seg_end:.2f}s] {speaker}: {text}\\n") # Removed extra strip()
                     else:
+                        # <<< Log if no segments found >>>
+                        logger.warning(f"Master Transcript: No transcribed speaker turns found for segment {segment_index}.")
                         f.write("Transcription: (Not available or failed)\\n")
                         
                     # <<< Remove Soundbite Info >>>

@@ -140,7 +140,8 @@ def get_event_guided_preset(**kwargs) -> Dict[str, Any]:
             },
             "event_detection": { # Pass 1 configuration
                 # <<< Set explicit defaults for call boundaries, including dial/busy >>>
-                "target_events": ["telephone ringing", "hang-up tones", "dial tone", "busy signal"], 
+                # <<< Add speech/conversation for middle events >>>
+                "target_events": ["telephone ringing", "hang-up tones", "dial tone", "busy signal", "speech", "conversation"], 
                 "threshold": kwargs.get("event_threshold", 0.15), # Use lower default if not provided
                 "chunk_duration_s": 5.0, # Default chunk size for Pass 1
                 "min_duration": kwargs.get("event_min_gap", 1.0) # Minimum gap between same events
