@@ -922,23 +922,39 @@ def process_audio(
     # >>>>>>>> START NEW SEGMENT PROCESSING LOOP HERE <<<<<<<<
     
     # --- Load models needed for segment processing (if workflow requires it) ---
-    clap_model_pass2 = None
-    clap_processor_pass2 = None
+    # <<< REMOVE Pass 2 CLAP Model Loading >>>
+    # clap_model_pass2 = None
+    # clap_processor_pass2 = None
     whisper_model_pass2 = None
+    pyannote_pipeline = None # <<< ADD Pyannote Pipeline variable >>>
+    hf_token = preset_config.get("hf_token") # <<< Get HF Token >>>
 
     if workflow.get("cut_between_events") and conversation_segments: # Only load if we actually have segments
-        if workflow.get("annotate_segments"):
-            logging.info("Workflow requires Pass 2 segment annotation, loading CLAP model...")
-            try:
-                t_clap_load_start = time.time()
-                clap_model_pass2 = ClapModel.from_pretrained("laion/clap-htsat-unfused").to(processing_device)
-                clap_processor_pass2 = ClapProcessor.from_pretrained("laion/clap-htsat-unfused")
-                clap_model_pass2.eval() 
-                logging.info(f"CLAP model/processor (Pass 2) loaded successfully in {time.time() - t_clap_load_start:.2f}s")
-            except Exception as e:
-                logging.error(f"Failed to load CLAP model/processor for Pass 2: {e}", exc_info=True)
+        # <<< REMOVE Pass 2 CLAP Loading Block >>>
+        # if workflow.get("annotate_segments"):
+        #     ...
         
-        if workflow.get("transcribe"):
+        # <<< ADD Pyannote Loading Block >>>
+        if workflow.get("transcribe"): # Diarization is needed for transcription in this workflow
+             if hf_token:
+                 try:
+                     logging.info("Loading Pyannote diarization pipeline...")
+                     t_pyannote_load_start = time.time()
+                     # Ensure model is appropriate, e.g., speaker-diarization
+                     # Using a common default model here
+                     pyannote_pipeline = Pipeline.from_pretrained(
+                          "pyannote/speaker-diarization-3.1", 
+                          use_auth_token=hf_token
+                     ).to(processing_device)
+                     logging.info(f"Pyannote pipeline loaded in {time.time() - t_pyannote_load_start:.2f}s")
+                 except Exception as e:
+                     logging.error(f"Failed to load Pyannote pipeline: {e}. Diarization/transcription will be skipped.", exc_info=True)
+                     pyannote_pipeline = None
+             else:
+                 logging.warning("Hugging Face token not provided. Skipping Pyannote diarization and segment transcription.")
+
+        # <<< Keep Whisper Loading Block (needed for transcription) >>>
+        if workflow.get("transcribe") and pyannote_pipeline: # Only load Whisper if Pyannote loaded
             logging.info("Workflow requires segment transcription, loading Whisper model...")
             try:
                 transcribe_config = preset_config.get("transcription", {})
@@ -948,6 +964,7 @@ def process_audio(
                 logging.info(f"Whisper model ({model_size}) loaded for segments in {time.time() - t_whisper_load_start:.2f}s")
             except Exception as e:
                 logging.error(f"Failed to load Whisper model for segment transcription: {e}", exc_info=True)
+                whisper_model_pass2 = None # Ensure transcription is skipped if model fails
 
     # <<< PROCESSING LOOP FOR EACH CONVERSATION SEGMENT >>>
     if workflow.get("cut_between_events") and conversation_segments:
@@ -983,12 +1000,10 @@ def process_audio(
                 "status": "pending",
                 "demucs_vocals_path": None,
                 "demucs_nonvocals_path": None,
-                "annotation_path": None,
-                "pass2_annotations": {},
-                "transcription_path": None, # Path to main transcription file for segment
-                "transcription_details": {}, # Whisper result dictionary
-                "soundbites_dir": None,
-                "soundbites": []
+                "diarization_result": None, # Add field for diarization output
+                "speaker_slices_dir": None, # Add field for speaker slices output path
+                "speaker_slice_info": {}, # Add field for slice details
+                "transcription_segments": [], # Store list of transcribed speaker segments
             }
 
             # --- Determine Audio Source for Processing (Demucs or Original) --- 
@@ -1064,104 +1079,132 @@ def process_audio(
                 results["segments"].append(segment_results)
                 continue # Skip to next segment
 
-            # --- Pass 2 Annotation (CLAP) --- 
-            if workflow.get("annotate_segments") and clap_model_pass2 and clap_processor_pass2:
-                logging.info(f"--- Running Pass 2 CLAP Annotation on segment {idx} ---")
-                try:
-                    sound_config = preset_config.get("sound_detection", {})
-                    target_events = sound_config.get("target_prompts", DEFAULT_EVENTS)
-                    threshold = sound_config.get("threshold", 0.5)
-                    chunk_duration = sound_config.get("chunk_duration_s", 5.0)
-                    min_gap = sound_config.get("min_duration", 1.0) # Use sound_detection key for Pass 2 NMS?
-                    logging.info(f"Pass 2 Config: Threshold={threshold}, Chunk={chunk_duration}s, Min Gap={min_gap}s")
-                    logging.info(f"Pass 2 Target Events: {target_events}")
+            # --- REMOVE Pass 2 Annotation (CLAP) Block --- 
+            # if workflow.get("annotate_segments") and clap_model_pass2 and clap_processor_pass2:
+            #     logging.info(f"--- Running Pass 2 CLAP Annotation on segment {idx} ---")
+            #     try:
+            #         sound_config = preset_config.get("sound_detection", {})
+            #         target_events = sound_config.get("target_prompts", DEFAULT_EVENTS)
+            #         threshold = sound_config.get("threshold", 0.5)
+            #         chunk_duration = sound_config.get("chunk_duration_s", 5.0)
+            #         min_gap = sound_config.get("min_duration", 1.0) # Use sound_detection key for Pass 2 NMS?
+            #         logging.info(f"Pass 2 Config: Threshold={threshold}, Chunk={chunk_duration}s, Min Gap={min_gap}s")
+            #         logging.info(f"Pass 2 Target Events: {target_events}")
 
-                    pass2_annotations = run_clap_event_detection(
-                        audio_data=segment_audio_data_np, sample_rate=segment_sr,
-                        clap_model=clap_model_pass2, clap_processor=clap_processor_pass2,
-                        device=processing_device, target_events=target_events,
-                        threshold=threshold, chunk_duration=chunk_duration, min_gap=min_gap
-                    )
-                    segment_results["pass2_annotations"] = pass2_annotations
+            #         pass2_annotations = run_clap_event_detection(
+            #             audio_data=segment_audio_data_np, sample_rate=segment_sr,
+            #             clap_model=clap_model_pass2, clap_processor=clap_processor_pass2,
+            #             device=processing_device, target_events=target_events,
+            #             threshold=threshold, chunk_duration=chunk_duration, min_gap=min_gap
+            #         )
+            #         segment_results["pass2_annotations"] = pass2_annotations
                     
-                    # Save annotations
-                    annotation_path = os.path.join(segment_output_dir, "annotations.json")
-                    with open(annotation_path, 'w') as f: json.dump(pass2_annotations, f, indent=2)
-                    segment_results["annotation_path"] = os.path.relpath(annotation_path, output_dir)
-                    logging.info(f"Saved Pass 2 annotations for segment {idx} to {annotation_path}")
+            #         # Save annotations
+            #         annotation_path = os.path.join(segment_output_dir, "annotations.json")
+            #         with open(annotation_path, 'w') as f: json.dump(pass2_annotations, f, indent=2)
+            #         segment_results["annotation_path"] = os.path.relpath(annotation_path, output_dir)
+            #         logging.info(f"Saved Pass 2 annotations for segment {idx} to {annotation_path}")
 
-                except Exception as e:
-                    logging.error(f"Error during Pass 2 CLAP annotation for segment {idx}: {e}", exc_info=True)
-                    segment_results["status"] = "error_annotation"
-            elif workflow.get("annotate_segments"):
-                 logging.warning(f"Skipping Pass 2 annotation for segment {idx}: CLAP model not loaded.")
+            #     except Exception as e:
+            #         logging.error(f"Error during Pass 2 CLAP annotation for segment {idx}: {e}", exc_info=True)
+            #         segment_results["status"] = "error_annotation"
+            # elif workflow.get("annotate_segments"):
+            #      logging.warning(f"Skipping Pass 2 annotation for segment {idx}: CLAP model not loaded.")
 
-            # --- Segment Transcription (Whisper) --- 
-            if workflow.get("transcribe") and whisper_model_pass2:
-                logging.info(f"--- Running Whisper Transcription on segment {idx} ---")
+            # --- Initialize variables for transcription --- 
+            segment_transcriptions = [] # List to hold results from transcribe_with_whisper
+
+            # --- Segment Diarization & Transcription (Pyannote + Whisper) --- 
+            if workflow.get("transcribe") and pyannote_pipeline and whisper_model_pass2:
+                logging.info(f"--- Running Diarization & Transcription on segment {idx} ---")
                 try:
+                    # Diarization
+                    logging.info(f"Running Pyannote diarization on: {audio_source_for_processing}")
+                    num_speakers = preset_config.get("num_speakers", 2)
+                    auto_speakers = preset_config.get("auto_speakers", False)
+                    actual_num_speakers = num_speakers
+                    if auto_speakers:
+                        try:
+                             logging.info("Attempting automatic speaker count detection...")
+                             actual_num_speakers = detect_optimal_speakers(pyannote_pipeline, audio_source_for_processing)
+                             logging.info(f"Auto-detected optimal speakers: {actual_num_speakers}")
+                        except Exception as auto_speak_err:
+                             logging.warning(f"Auto speaker detection failed for segment {idx}: {auto_speak_err}. Falling back to num_speakers={num_speakers}")
+                             actual_num_speakers = num_speakers
+                    
+                    diarization = pyannote_pipeline(audio_source_for_processing, num_speakers=actual_num_speakers)
+                    segment_results["diarization_result"] = str(diarization) # Store as string for YAML
+                    
+                    # Speaker Slicing
+                    logging.info("Slicing segment by speaker...")
+                    segment_speakers_dir = os.path.join(segment_output_dir, "speakers")
+                    force_mono = preset_config.get("force_mono_output", False)
+                    segment_speaker_slices = slice_audio_by_speaker(
+                        audio_source_for_processing, 
+                        diarization, 
+                        segment_speakers_dir,
+                        force_mono_output=force_mono
+                    )
+                    segment_results["speaker_slices_dir"] = os.path.relpath(segment_speakers_dir, output_dir)
+                    segment_results["speaker_slice_info"] = segment_speaker_slices # Store detailed slice info
+                    
+                    # Transcription of Slices
+                    logging.info("Transcribing speaker slices...")
                     transcribe_config = preset_config.get("transcription", {})
                     word_timestamps = transcribe_config.get("word_timestamps", False)
                     
-                    # Note: Whisper takes file path, not audio data numpy array
-                    transcription_result = whisper_model_pass2.transcribe(
-                         audio_source_for_processing, 
-                         word_timestamps=word_timestamps
+                    segment_transcriptions = transcribe_with_whisper(
+                        whisper_model_pass2, 
+                        segment_speaker_slices, # Pass the dict of slices
+                        segment_output_dir, # Save whisper outputs inside segment dir
+                        enable_word_extraction=word_timestamps, 
+                        force_mono_output=force_mono
+                        # speaker_suffix is not needed here as slices are already per-segment
                     )
-                    segment_results["transcription_details"] = transcription_result # Store full Whisper result
+                    segment_results["transcription_segments"] = segment_transcriptions # Store the list of dicts
                     
-                    # Save transcription text
-                    ts_text_path = os.path.join(segment_output_dir, "transcript.txt")
-                    with open(ts_text_path, 'w', encoding='utf-8') as f:
-                        f.write(f"Segment {idx} ({segment_results['start_original']:.2f}s - {segment_results['end_original']:.2f}s)\n\n")
-                        f.write(transcription_result["text"])
-                    segment_results["transcription_path"] = os.path.relpath(ts_text_path, output_dir)
-                    logging.info(f"Saved transcription text for segment {idx} to {ts_text_path}")
-
-                    # Save transcription JSON (optional, maybe remove if too large?)
-                    # ts_json_path = os.path.join(segment_output_dir, "transcript.json")
-                    # with open(ts_json_path, 'w') as f: json.dump(transcription_result, f, indent=2)
-                    # segment_results["transcription_json_path"] = os.path.relpath(ts_json_path, output_dir)
-
                 except Exception as e:
-                    logging.error(f"Error during Whisper transcription for segment {idx}: {e}", exc_info=True)
-                    segment_results["status"] = "error_transcription"
-                    segment_results["transcription_details"] = {"error": str(e)}
+                    logging.error(f"Error during diarization/transcription for segment {idx}: {e}", exc_info=True)
+                    segment_results["status"] = "error_diarization_transcription"
+                    
             elif workflow.get("transcribe"):
-                 logging.warning(f"Skipping transcription for segment {idx}: Whisper model not loaded.")
-
-            # --- Soundbite Extraction --- 
-            if workflow.get("extract_soundbites") and segment_results["pass2_annotations"]:
-                logging.info(f"--- Extracting Soundbites for segment {idx} ---")
-                try:
-                    soundbite_config = preset_config.get("sound_detection", {}) # Re-use sound detection config for extraction params?
-                    confidence_thresh = soundbite_config.get("confidence_threshold", 0.3) # Example threshold
-                    min_duration = soundbite_config.get("min_bite_duration", 0.2)
-                    padding = soundbite_config.get("bite_padding_ms", 150)
+                 if not pyannote_pipeline:
+                     logging.warning(f"Skipping diarization/transcription for segment {idx}: Pyannote pipeline not loaded.")
+                 if not whisper_model_pass2:
+                     logging.warning(f"Skipping transcription for segment {idx}: Whisper model not loaded.")
+            
+            # --- REMOVE Soundbite Extraction Block --- 
+            # if workflow.get("extract_soundbites") and segment_results["pass2_annotations"]:
+            #     logging.info(f"--- Extracting Soundbites for segment {idx} ---")
+            #     try:
+            #         soundbite_config = preset_config.get("sound_detection", {}) # Re-use sound detection config for extraction params?
+            #         confidence_thresh = soundbite_config.get("confidence_threshold", 0.3) # Example threshold
+            #         min_duration = soundbite_config.get("min_bite_duration", 0.2)
+            #         padding = soundbite_config.get("bite_padding_ms", 150)
                     
-                    # <<< Save soundbites to the central directory >>>
-                    # soundbites_output_dir = os.path.join(segment_output_dir, "soundbites") # Old location
-                    # Use segment filename without extension as base
-                    segment_base_name = os.path.splitext(os.path.basename(segment_abs_path))[0]
+            #         # <<< Save soundbites to the central directory >>>
+            #         # soundbites_output_dir = os.path.join(segment_output_dir, "soundbites") # Old location
+            #         # Use segment filename without extension as base
+            #         segment_base_name = os.path.splitext(os.path.basename(segment_abs_path))[0]
                     
-                    extracted_bite_paths = extract_soundbites(
-                        segment_audio_path=audio_source_for_processing, # Use vocals if available
-                        segment_annotations=segment_results["pass2_annotations"],
-                        output_dir=central_soundbites_dir, # <<< Use central dir >>>
-                        base_filename=f"seg{idx:04d}_{segment_base_name}",
-                        min_duration_s=min_duration,
-                        padding_ms=padding,
-                        confidence_threshold=confidence_thresh
-                    )
-                    # <<< Store relative path to the central directory >>>
-                    segment_results["soundbites_dir"] = relative_soundbites_dir_path 
-                    segment_results["soundbites"] = [os.path.relpath(p, output_dir) for p in extracted_bite_paths]
-                    logging.info(f"Extracted {len(extracted_bite_paths)} soundbites for segment {idx} to {central_soundbites_dir}.") # Log central dir
-                except Exception as e:
-                     logging.error(f"Error during soundbite extraction for segment {idx}: {e}", exc_info=True)
-                     segment_results["status"] = "error_soundbites"
-            elif workflow.get("extract_soundbites"):
-                 logging.warning(f"Skipping soundbite extraction for segment {idx}: No Pass 2 annotations available.")
+            #         extracted_bite_paths = extract_soundbites(
+            #             segment_audio_path=audio_source_for_processing, # Use vocals if available
+            #             segment_annotations=segment_results["pass2_annotations"],
+            #             output_dir=central_soundbites_dir, # <<< Use central dir >>>
+            #             base_filename=f"seg{idx:04d}_{segment_base_name}",
+            #             min_duration_s=min_duration,
+            #             padding_ms=padding,
+            #             confidence_threshold=confidence_thresh
+            #         )
+            #         # <<< Store relative path to the central directory >>>
+            #         segment_results["soundbites_dir"] = relative_soundbites_dir_path 
+            #         segment_results["soundbites"] = [os.path.relpath(p, output_dir) for p in extracted_bite_paths]
+            #         logging.info(f"Extracted {len(extracted_bite_paths)} soundbites for segment {idx} to {central_soundbites_dir}.") # Log central dir
+            #     except Exception as e:
+            #          logging.error(f"Error during soundbite extraction for segment {idx}: {e}", exc_info=True)
+            #          segment_results["status"] = "error_soundbites"
+            #  elif workflow.get("extract_soundbites"):
+            #       logging.warning(f"Skipping soundbite extraction for segment {idx}: No Pass 2 annotations available.")
 
             # Update status if still pending
             if segment_results["status"] == "pending":
@@ -1174,14 +1217,18 @@ def process_audio(
             logging.info(f"--- Finished Processing Segment {idx} --- ")
             
     # --- Unload models after segment processing loop --- 
-    if clap_model_pass2:
-        del clap_model_pass2, clap_processor_pass2
-        if processing_device.type == 'cuda': torch.cuda.empty_cache()
-        logging.info("Pass 2 CLAP model/processor released.")
+    # <<< REMOVE CLAP Unload >>>
+    # if clap_model_pass2:
+    #    ...
     if whisper_model_pass2:
         del whisper_model_pass2
         if processing_device.type == 'cuda': torch.cuda.empty_cache()
         logging.info("Segment Whisper model released.")
+    # <<< ADD Pyannote Unload >>>
+    if pyannote_pipeline:
+         del pyannote_pipeline # Simple deletion might be enough, check docs if specific unload needed
+         if processing_device.type == 'cuda': torch.cuda.empty_cache()
+         logging.info("Pyannote pipeline released.")
 
     # <<< ELSE: Handle Standard/Non-Segment-Based Workflows >>>
     elif not workflow.get("cut_between_events"): # Check if it's NOT the two-pass segment workflow
@@ -1373,37 +1420,24 @@ def process_audio(
                     f.write(f"--- Segment {segment_index} ({start_time:.2f}s - {end_time:.2f}s) ---\\n")
                     f.write(f"Status: {status}\\n")
                     
-                    transcript_text = "(Transcription not available or failed)"
-                    # Prioritize reading from the saved text file if it exists
-                    transcript_file_rel = seg_res.get("transcription_path")
-                    if transcript_file_rel:
-                        transcript_file_abs = os.path.join(output_dir, transcript_file_rel)
-                        if os.path.exists(transcript_file_abs):
-                            try:
-                                with open(transcript_file_abs, 'r', encoding='utf-8') as ts_f:
-                                    # Skip the header line (line 0) and blank line (line 1)
-                                    lines = ts_f.readlines()
-                                    if len(lines) > 2:
-                                        transcript_text = "".join(lines[2:]).strip()
-                                    elif len(lines) == 1: # Only header
-                                        transcript_text = "(Transcript file only contained header)"
-                                    elif len(lines) == 2: # Header + blank line
-                                         transcript_text = "(Transcript file contained header and blank line only)"
-                                    else: # Empty file?
-                                         transcript_text = "(Empty transcript file)"
-                            except Exception as read_err:
-                                transcript_text = f"(Error reading transcript file: {read_err})"
-                        else:
-                            transcript_text = "(Transcript file not found)"
-                    # Fallback to text stored in results if file path missing or failed
-                    elif seg_res.get("transcription_details") and isinstance(seg_res["transcription_details"], dict):
-                        transcript_text = seg_res["transcription_details"].get("text", transcript_text)
+                    # <<< Modify transcription writing for segments >>>
+                    transcribed_segments = seg_res.get("transcription_segments", [])
+                    if transcribed_segments:
+                        # Sort speaker turns by start time within the segment
+                        transcribed_segments.sort(key=lambda x: x.get('start', 0))
+                        f.write("Transcription:\\n")
+                        for ts_seg in transcribed_segments:
+                            speaker = ts_seg.get('speaker', 'UNK')
+                            seg_start = ts_seg.get('start', 0)
+                            seg_end = ts_seg.get('end', 0)
+                            text = ts_seg.get('text', '(No text)')
+                            f.write(f"  [{seg_start:.2f}s - {seg_end:.2f}s] {speaker}: {text.strip()}\\n")
+                    else:
+                        f.write("Transcription: (Not available or failed)\\n")
                         
-                    f.write(f"Transcription:\\n{transcript_text.strip()}\\n")
-                    
-                    # Optionally add annotation summary or soundbite info here too
-                    num_soundbites = len(seg_res.get("soundbites", []))
-                    f.write(f"Soundbites Extracted: {num_soundbites}\\n")
+                    # <<< Remove Soundbite Info >>>
+                    # num_soundbites = len(seg_res.get("soundbites", []))
+                    # f.write(f"Soundbites Extracted: {num_soundbites}\\n")
                     f.write("\\n" + "-"*20 + "\\n\\n") # Separator
                     # --- End Segment Information ---
                     
@@ -1432,9 +1466,11 @@ def process_audio(
                      "start": seg_res.get("start_original"),
                      "end": seg_res.get("end_original"),
                      "duration": seg_res.get("duration"),
-                     "num_annotations": len(seg_res.get("pass2_annotations", {})), # Count annotations
-                     "transcription_length": len(seg_res.get("transcription_details", {}).get("text", "")) if seg_res.get("transcription_details") else 0,
-                     "num_soundbites": len(seg_res.get("soundbites", [])),
+                     # <<< Update YAML summary fields >>>
+                     # "num_annotations": len(seg_res.get("pass2_annotations", {})), 
+                     "num_transcribed_chunks": len(seg_res.get("transcription_segments", [])),
+                     # "transcription_length": len(seg_res.get("transcription_details", {}).get("text", "")) if seg_res.get("transcription_details") else 0, # Maybe less useful now
+                     # "num_soundbites": len(seg_res.get("soundbites", [])),
                      "output_dir": seg_res.get("segment_output_dir")
                  }
                  segment_summaries.append(summary)

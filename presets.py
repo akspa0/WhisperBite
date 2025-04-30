@@ -118,7 +118,7 @@ def get_event_guided_preset(**kwargs) -> Dict[str, Any]:
     workflow_config = {
         "detect_events": True,             # Enable Pass 1 CLAP
         "cut_between_events": True,      # NEW: Cut audio based on Pass 1 event boundaries
-        "annotate_segments": True,       # NEW: Run Pass 2 CLAP and soundbite extraction on segments
+        "annotate_segments": False,       # <<< Disable Pass 2 CLAP annotation >>>
         "transcribe": True,              # Enable transcription (will happen per-segment)
         "separate_vocals": False,        # Default disabled for this workflow
         "use_events_for_transcription": False, # Transcription guided by Pass 2 'speech' detection within segments
@@ -128,15 +128,14 @@ def get_event_guided_preset(**kwargs) -> Dict[str, Any]:
 
     return {
         "name": "Event-Guided",
-        "description": "Two-pass: Detect events (e.g., calls) first, then process segments individually.",
+        "description": "Two-pass: Detect events (e.g., calls) first, then diarizes and transcribes segments individually.",
         "config": {
             "workflow": {
                 "detect_events": True, # Pass 1: Detect boundaries
                 "cut_between_events": True, # Cut based on Pass 1
-                "annotate_segments": True, # Pass 2: Annotate each segment
-                "transcribe": True, # Pass 2: Transcribe each segment
-                "extract_soundbites": True, # Pass 2: Extract based on annotations
-                # Inherit other settings like separate_vocals, model size etc. if not overridden
+                "annotate_segments": False, # <<< Disable Pass 2 CLAP annotation >>>
+                "transcribe": True, # Pass 2: Transcribe each segment (now via diarization)
+                "extract_soundbites": False, # <<< Disable soundbite extraction >>>
                 "separate_vocals": kwargs.get("enable_vocal_separation", False), # Can be enabled
             },
             "event_detection": { # Pass 1 configuration
