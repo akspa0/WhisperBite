@@ -139,14 +139,14 @@ def get_event_guided_preset(**kwargs) -> Dict[str, Any]:
                 "separate_vocals": kwargs.get("enable_vocal_separation", False), # Can be enabled
             },
             "event_detection": { # Pass 1 configuration
-                # <<< Set explicit defaults for call boundaries >>>
-                "target_events": ["telephone ringing", "hang-up tones"], 
-                "threshold": kwargs.get("event_threshold", 0.3), # Lower threshold for boundary events
-                "chunk_duration_s": kwargs.get("event_chunk_duration", 5.0), # Use specific kwargs if needed
-                "min_duration": kwargs.get("event_min_gap", 1.0)
+                # <<< Set explicit defaults for call boundaries, including dial/busy >>>
+                "target_events": ["telephone ringing", "hang-up tones", "dial tone", "busy signal"], 
+                "threshold": kwargs.get("event_threshold", 0.15), # Use lower default if not provided
+                "chunk_duration_s": 5.0, # Default chunk size for Pass 1
+                "min_duration": kwargs.get("event_min_gap", 1.0) # Minimum gap between same events
             },
-            "sound_detection": { # Pass 2 configuration (for annotation)
-                "target_prompts": kwargs.get("clap_target_prompts", DEFAULT_EVENTS), # Default to broad events for annotation
+            "sound_detection": { # Pass 2 configuration (NOW UNUSED BY THIS PRESET)
+                "target_prompts": kwargs.get("clap_target_prompts", TARGET_SOUND_PROMPTS), # Use default if not provided
                 "threshold": kwargs.get("clap_threshold", 0.5), # Higher threshold for segment annotation
                 "chunk_duration_s": kwargs.get("clap_chunk_duration", 5.0)
             },

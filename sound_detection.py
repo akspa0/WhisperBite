@@ -695,6 +695,7 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
     """
     Cuts audio into segments based on sequential pairs of start/end events.
     Identifies a 'start_type' event and finds the *next* 'end_type' event that occurs after it.
+    Skips any 'end_type' events that occur before the first 'start_type' event.
     Extracts the audio segment from the start of the start_event to the end of the end_event, with padding.
 
     Args:
@@ -714,47 +715,72 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
     logger.info(f"Cutting audio based on event pairs: start={start_types}, end={end_types}")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Separate start and end events
-    start_events = []
-    end_events = []
-    for event_type, events_list in all_events.items():
-        if event_type in start_types:
-            start_events.extend(events_list)
-        elif event_type in end_types:
-            end_events.extend(events_list)
+    all_detected_events = []
+    for type_key, events_list in all_events.items():
+        for event in events_list:
+            # Add the type back into the event dict for easier processing
+            event_data = event.copy()
+            event_data['type'] = type_key
+            all_detected_events.append(event_data)
+            
+    # Sort all events chronologically by start time
+    all_detected_events.sort(key=lambda x: x['start'])
+    
+    if not all_detected_events:
+        logger.warning("No events provided for cutting.")
+        return []
+        
+    # <<< Handle initial end events >>>
+    first_event_index = 0
+    while first_event_index < len(all_detected_events) and \
+          all_detected_events[first_event_index]['type'] in end_types:
+        logger.debug(f"Skipping initial end event: {all_detected_events[first_event_index]['type']} at {all_detected_events[first_event_index]['start']:.2f}s")
+        first_event_index += 1
+        
+    if first_event_index >= len(all_detected_events):
+         logger.warning("No start events found after skipping initial end events.")
+         return []
+
+    # Separate into start and end types *after* potentially skipping initial end events
+    start_events = [e for e in all_detected_events[first_event_index:] if e['type'] in start_types]
+    end_events = [e for e in all_detected_events[first_event_index:] if e['type'] in end_types]
 
     if not start_events or not end_events:
-        logger.warning("No start or end events found for cutting. Cannot create segments.")
+        logger.warning("Not enough start or end events found after filtering.")
         return []
 
-    # Sort both lists by start time
-    start_events.sort(key=lambda x: x['start'])
-    end_events.sort(key=lambda x: x['start'])
+    logger.info(f"Found {len(start_events)} potential start events and {len(end_events)} potential end events.")
 
     saved_segments = []
+    segment_index = 0
     try:
         audio = AudioSegment.from_file(audio_path)
         audio_duration_ms = len(audio)
-        base_name = os.path.splitext(os.path.basename(audio_path))[0]
-        segment_index = 0
+        
+        # --- Find sequential pairs ---
         end_event_idx = 0 # Keep track of the search start position for end events
 
         # Iterate through start events
         for start_event in start_events:
             found_end_event = None
             # Find the first end event that starts *after* this start event begins
-            while end_event_idx < len(end_events):
-                end_event = end_events[end_event_idx]
-                if end_event['start'] > start_event['start']: # Found a potential end
+            # Start searching from the current end_event_idx
+            current_search_idx = end_event_idx
+            while current_search_idx < len(end_events):
+                end_event = end_events[current_search_idx]
+                # Ensure the end event starts AFTER the start event starts
+                if end_event['start'] > start_event['start']: 
                     found_end_event = end_event
                     logger.debug(f"Pair found: Start ('{start_event['type']}' at {start_event['start']:.2f}s) -> End ('{end_event['type']}' at {end_event['start']:.2f}s)")
+                    # Update the main end_event_idx to start the *next* search from *after* this found end event
+                    end_event_idx = current_search_idx + 1 
                     break # Use this end event
-                end_event_idx += 1 # Keep searching if this end event is too early
+                current_search_idx += 1 # Keep searching if this end event is too early or the same as start
             
-            # If no suitable end event was found for this start event, continue to the next start event
+            # If no suitable end event was found for this start event, we are done with start events
             if not found_end_event:
-                 logger.debug(f"No suitable end event found after start event '{start_event['type']}' at {start_event['start']:.2f}s")
-                 continue
+                 logger.debug(f"No suitable end event found after start event '{start_event['type']}' at {start_event['start']:.2f}s. Stopping search.")
+                 break # No more pairs can be formed
 
             # Define cut boundaries with padding
             # Segment includes the start and end events themselves
@@ -792,15 +818,10 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
                 })
                 segment_index += 1
                 
-                # IMPORTANT: Advance the end_event_idx search pointer *past* the found end event
-                # so it's not reused for the next start event. This ensures sequential pairing.
-                end_event_idx += 1 
-                
-            else:
-                logger.debug(f"  -> Skipping segment between {start_event['start']:.2f}s and {found_end_event['end']:.2f}s: Duration {segment_duration_s:.2f}s < {min_duration_s}s")
                 # If skipped, we still need to advance end_event_idx past the found end event 
                 # to avoid considering it again for the next start event.
-                end_event_idx += 1
+                # Already handled by setting end_event_idx = current_search_idx + 1 above
+                pass # No action needed here, index is already advanced
             
             # If end_event_idx reaches the end, no more segments can be found
             if end_event_idx >= len(end_events):

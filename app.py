@@ -321,12 +321,18 @@ def update_ui_for_preset(preset_name):
     # Use .get() with defaults for safety
     event_detect_visible = workflow.get('detect_events', False)
     # <<< Base sound detection visibility/interactivity on 'annotate_segments' flag >>>
+    # NOTE: We changed Event-Guided, so annotate_segments is now False for it.
     sound_detect_controls_interactive = workflow.get('annotate_segments', False) 
     # transcription_visible = workflow.get('transcribe', False)
     # separation_visible = workflow.get('separate_vocals', False)
     
     # <<< Specific check for Event-Guided preset >>>
-    event_guided_specific_visible = preset_name == "Event-Guided"
+    is_event_guided = preset_name == "Event-Guided"
+    event_guided_specific_visible = is_event_guided
+
+    # <<< Determine interactivity of the main event prompts >>>
+    # Make it non-interactive if Event-Guided is selected, otherwise depend on detect_events flag
+    main_event_prompts_interactive = event_detect_visible and not is_event_guided
 
     # Default values from preset configs or constants
     default_event_threshold = event_cfg.get('threshold', 0.5)
@@ -347,11 +353,13 @@ def update_ui_for_preset(preset_name):
     # Ensure no trailing whitespace or explicit \ characters on these lines
     return (
         # Event Detection Components (Order: prompts, threshold, min_gap)
-        gr.update(placeholder=default_event_prompts, value="", interactive=event_detect_visible),
+        # <<< Update interactivity based on main_event_prompts_interactive >>>
+        gr.update(placeholder=default_event_prompts, value="", interactive=main_event_prompts_interactive),
         gr.update(value=default_event_threshold, interactive=event_detect_visible),
         gr.update(value=default_event_min_gap, interactive=event_detect_visible),
         
         # Sound Detection Components (Order: prompts, threshold, chunk_duration)
+        # <<< Interactivity now correctly reflects if CLAP Pass 2 is used >>>
         gr.update(placeholder=default_sound_prompts, value="", interactive=sound_detect_controls_interactive),
         gr.update(value=default_sound_threshold, interactive=sound_detect_controls_interactive),
         gr.update(value=default_sound_chunk_duration, interactive=sound_detect_controls_interactive),
