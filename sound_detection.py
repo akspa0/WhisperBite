@@ -690,40 +690,46 @@ def detect_sound_events(
     return detected_events
 
 def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]], output_dir: str,
-                           start_types=("ringing phone",), end_types=("hang-up tones",),
-                           min_duration_s=2.0, padding_ms=500) -> List[Dict]:
+                           start_types=("telephone ringing",), end_types=("hang-up tones",),
+                           min_duration_s=2.0, padding_ms=250) -> List[Dict]:
     """
-    Cuts audio into segments based on pairs of end/start events.
-    Extracts audio *between* the end of an 'end_type' event and the start of the *next* 'start_type' event.
+    Cuts audio into segments based on sequential pairs of start/end events.
+    Identifies a 'start_type' event and finds the *next* 'end_type' event that occurs after it.
+    Extracts the audio segment from the start of the start_event to the end of the end_event, with padding.
 
     Args:
         audio_path (str): Path to the original audio file.
         all_events (Dict[str, List[Dict]]): Dictionary of detected events from Pass 1, 
                                            e.g., {'ringing phone': [...], 'hang-up tones': [...]}.
         output_dir (str): Directory to save the cut conversation segments.
-        start_types (tuple): Event types marking the beginning of a segment boundary.
-        end_types (tuple): Event types marking the end of a segment boundary.
+        start_types (tuple): Event types marking the beginning of a desired segment.
+        end_types (tuple): Event types marking the end of a desired segment.
         min_duration_s (float): Minimum duration in seconds for a segment to be saved.
-        padding_ms (int): Padding in milliseconds added after the end_event and before the start_event.
+        padding_ms (int): Padding in milliseconds added before the start_event and after the end_event.
 
     Returns:
         List[Dict]: List of dictionaries for each saved segment, containing 
                     {'path': str, 'start': float, 'end': float, 'duration': float}.
     """
-    logger.info(f"Cutting audio between events: start_types={start_types}, end_types={end_types}")
+    logger.info(f"Cutting audio based on event pairs: start={start_types}, end={end_types}")
     os.makedirs(output_dir, exist_ok=True)
     
-    relevant_events = []
+    # Separate start and end events
+    start_events = []
+    end_events = []
     for event_type, events_list in all_events.items():
-        if event_type in start_types or event_type in end_types:
-            relevant_events.extend(events_list)
+        if event_type in start_types:
+            start_events.extend(events_list)
+        elif event_type in end_types:
+            end_events.extend(events_list)
 
-    if not relevant_events:
-        logger.warning("No relevant start/end events found for cutting.")
+    if not start_events or not end_events:
+        logger.warning("No start or end events found for cutting. Cannot create segments.")
         return []
 
-    # Sort all relevant events by start time
-    relevant_events.sort(key=lambda x: x['start'])
+    # Sort both lists by start time
+    start_events.sort(key=lambda x: x['start'])
+    end_events.sort(key=lambda x: x['start'])
 
     saved_segments = []
     try:
@@ -731,62 +737,80 @@ def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]],
         audio_duration_ms = len(audio)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
         segment_index = 0
+        end_event_idx = 0 # Keep track of the search start position for end events
 
-        last_end_event = None
-        for i, current_event in enumerate(relevant_events):
-            # Look for an end event
-            if current_event['type'] in end_types:
-                last_end_event = current_event
-                logger.debug(f"Found potential end event: {last_end_event['type']} at {last_end_event['start']:.2f}s")
-                continue # Move to the next event to find the corresponding start
+        # Iterate through start events
+        for start_event in start_events:
+            found_end_event = None
+            # Find the first end event that starts *after* this start event begins
+            while end_event_idx < len(end_events):
+                end_event = end_events[end_event_idx]
+                if end_event['start'] > start_event['start']: # Found a potential end
+                    found_end_event = end_event
+                    logger.debug(f"Pair found: Start ('{start_event['type']}' at {start_event['start']:.2f}s) -> End ('{end_event['type']}' at {end_event['start']:.2f}s)")
+                    break # Use this end event
+                end_event_idx += 1 # Keep searching if this end event is too early
             
-            # If we have found an end event, look for the *next* start event
-            if last_end_event and current_event['type'] in start_types:
-                start_event = current_event
-                logger.debug(f"Found potential start event: {start_event['type']} at {start_event['start']:.2f}s after end event at {last_end_event['start']:.2f}s")
-                
-                # Define cut boundaries with padding
-                cut_start_ms = int(last_end_event['end'] * 1000) + padding_ms
-                cut_end_ms = int(start_event['start'] * 1000) - padding_ms
+            # If no suitable end event was found for this start event, continue to the next start event
+            if not found_end_event:
+                 logger.debug(f"No suitable end event found after start event '{start_event['type']}' at {start_event['start']:.2f}s")
+                 continue
 
-                # Ensure boundaries are valid and start < end
-                cut_start_ms = max(0, cut_start_ms)
-                cut_end_ms = min(audio_duration_ms, cut_end_ms)
-                
-                segment_duration_s = (cut_end_ms - cut_start_ms) / 1000.0
-
-                if segment_duration_s >= min_duration_s:
-                    logger.info(f"  -> Extracting segment {segment_index}: {cut_start_ms/1000.0:.2f}s - {cut_end_ms/1000.0:.2f}s (Duration: {segment_duration_s:.2f}s)")
-                    segment_audio = audio[cut_start_ms:cut_end_ms]
-                    
-                    segment_filename = f"{segment_index:04d}_conv_{int(cut_start_ms/1000.0)}_{int(cut_end_ms/1000.0)}.wav"
-                    segment_path = os.path.join(output_dir, segment_filename)
-                    
-                    # Export the segment
-                    segment_audio.export(segment_path, format="wav")
-                    
-                    saved_segments.append({
-                        'path': segment_path,
-                        'start': cut_start_ms / 1000.0,
-                        'end': cut_end_ms / 1000.0,
-                        'duration': segment_duration_s
-                    })
-                    segment_index += 1
-                else:
-                    logger.debug(f"  -> Skipping segment between {last_end_event['end']:.2f}s and {start_event['start']:.2f}s: Duration {segment_duration_s:.2f}s < {min_duration_s}s")
-
-                # Reset last_end_event, as we've found its corresponding start and cut the segment
-                last_end_event = None 
+            # Define cut boundaries with padding
+            # Segment includes the start and end events themselves
+            cut_start_ms = max(0, int(start_event['start'] * 1000) - padding_ms)
+            cut_end_ms = min(audio_duration_ms, int(found_end_event['end'] * 1000) + padding_ms)
             
-            # If the current event is a start event but we haven't seen an end event yet, 
-            # it might mark the beginning of the audio before the first hangup, 
-            # or it might be an isolated start. Handled by requiring last_end_event to be set.
+            segment_duration_s = (cut_end_ms - cut_start_ms) / 1000.0
+
+            if segment_duration_s >= min_duration_s:
+                logger.info(f"  -> Extracting segment {segment_index}: {cut_start_ms/1000.0:.2f}s - {cut_end_ms/1000.0:.2f}s (Duration: {segment_duration_s:.2f}s)")
+                segment_audio = audio[cut_start_ms:cut_end_ms]
+                
+                segment_filename = f"{segment_index:04d}_conv_{int(cut_start_ms/1000.0)}_{int(cut_end_ms/1000.0)}.wav"
+                segment_path = os.path.join(output_dir, segment_filename)
+                
+                # Export the segment, explicitly setting sample rate
+                try:
+                    segment_audio.export(
+                        segment_path, 
+                        format="wav",
+                        parameters=["-ar", str(CLAP_SAMPLE_RATE), "-acodec", "pcm_s16le"] # Force 48kHz WAV
+                    )
+                except Exception as export_err:
+                     logger.error(f"Failed to export segment {segment_index} at {CLAP_SAMPLE_RATE}Hz: {export_err}")
+                     # Optionally try exporting without parameters as fallback?
+                     # Or just skip this segment?
+                     # Let's skip for now if forcing SR fails.
+                     continue # Skip appending if export failed
+                
+                saved_segments.append({
+                    'path': segment_path,
+                    'start': cut_start_ms / 1000.0,
+                    'end': cut_end_ms / 1000.0,
+                    'duration': segment_duration_s
+                })
+                segment_index += 1
+                
+                # IMPORTANT: Advance the end_event_idx search pointer *past* the found end event
+                # so it's not reused for the next start event. This ensures sequential pairing.
+                end_event_idx += 1 
+                
+            else:
+                logger.debug(f"  -> Skipping segment between {start_event['start']:.2f}s and {found_end_event['end']:.2f}s: Duration {segment_duration_s:.2f}s < {min_duration_s}s")
+                # If skipped, we still need to advance end_event_idx past the found end event 
+                # to avoid considering it again for the next start event.
+                end_event_idx += 1
+            
+            # If end_event_idx reaches the end, no more segments can be found
+            if end_event_idx >= len(end_events):
+                 break 
 
     except Exception as e:
-        logger.error(f"Error during audio cutting between events: {e}", exc_info=True)
+        logger.error(f"Error during audio cutting based on event pairs: {e}", exc_info=True)
         return [] # Return empty list on error
 
-    logger.info(f"Finished cutting between events. Saved {len(saved_segments)} segments.")
+    logger.info(f"Finished cutting based on event pairs. Saved {len(saved_segments)} segments.")
     return saved_segments
 
 def extract_soundbites(segment_audio_path: str, segment_annotations: Dict[str, List[Dict]], 

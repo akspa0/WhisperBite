@@ -128,29 +128,44 @@ def get_event_guided_preset(**kwargs) -> Dict[str, Any]:
 
     return {
         "name": "Event-Guided",
-        "description": "Prioritizes detecting specific events (Pass 1) to segment audio, then detects sounds/speech within segments (Pass 2) and transcribes.",
-        # <<< Wrap settings under 'config' key >>>
+        "description": "Two-pass: Detect events (e.g., calls) first, then process segments individually.",
         "config": {
-            "workflow": workflow_config,
-            "event_detection": { # Pass 1 Config (for cutting)
-                "target_events": kwargs.get("event_target_prompts", ["ringing phone", "hang-up tones"]),
-                "threshold": kwargs.get("event_threshold", 0.5),
-                "chunk_duration_s": kwargs.get("event_chunk_duration_s", 5.0),
-                "min_duration": kwargs.get("event_min_duration", 1.0) # Corresponds to min_gap
+            "workflow": {
+                "detect_events": True, # Pass 1: Detect boundaries
+                "cut_between_events": True, # Cut based on Pass 1
+                "annotate_segments": True, # Pass 2: Annotate each segment
+                "transcribe": True, # Pass 2: Transcribe each segment
+                "extract_soundbites": True, # Pass 2: Extract based on annotations
+                # Inherit other settings like separate_vocals, model size etc. if not overridden
+                "separate_vocals": kwargs.get("enable_vocal_separation", False), # Can be enabled
             },
-            "sound_detection": { # Pass 2 Config (for annotation within segments)
-                "target_prompts": kwargs.get("sound_target_prompts", ["speech", "music", "sound effects", "laughter", "typing", "beep", "static", "background noise"]),
-                "threshold": kwargs.get("sound_threshold", 0.3),
-                "chunk_duration_s": kwargs.get("sound_chunk_duration_s", 5.0),
-                "min_duration": kwargs.get("sound_min_duration", 1.0) # Pass 2 NMS gap
+            "event_detection": { # Pass 1 configuration
+                # <<< Set explicit defaults for call boundaries >>>
+                "target_events": ["telephone ringing", "hang-up tones"], 
+                "threshold": kwargs.get("event_threshold", 0.3), # Lower threshold for boundary events
+                "chunk_duration_s": kwargs.get("event_chunk_duration", 5.0), # Use specific kwargs if needed
+                "min_duration": kwargs.get("event_min_gap", 1.0)
             },
-            "transcription": { # Settings for Whisper transcription run on each segment
-                "model_size": kwargs.get("transcription_model_size", "medium"),
-                "word_timestamps": kwargs.get("transcription_word_timestamps", False)
+            "sound_detection": { # Pass 2 configuration (for annotation)
+                "target_prompts": kwargs.get("clap_target_prompts", DEFAULT_EVENTS), # Default to broad events for annotation
+                "threshold": kwargs.get("clap_threshold", 0.5), # Higher threshold for segment annotation
+                "chunk_duration_s": kwargs.get("clap_chunk_duration", 5.0)
             },
-            # "diarization": { ... } # Placeholder for future
-            "vocal_separation": {}, # Empty, as workflow disables it by default
-            "segment_cutting": {} # Empty, as workflow uses cut_between_events
+            "transcription": {
+                "model_size": kwargs.get("model", "medium"), # Inherit model size
+                "word_timestamps": kwargs.get("enable_word_extraction", False) # Inherit word extraction setting
+            },
+            "vocal_separation": {
+                "model": "htdemucs" # Example, can be configured
+            },
+            # Include other necessary top-level args if whisperBite.py expects them
+            "num_speakers": kwargs.get("num_speakers", 2),
+            "auto_speakers": kwargs.get("auto_speakers", False),
+            "hf_token": kwargs.get("hf_token", None),
+            "split_stereo": kwargs.get("split_stereo", False),
+            "force_mono_output": kwargs.get("force_mono_output", False),
+            "enable_second_pass": kwargs.get("enable_second_pass", False), # Diarization 2nd pass
+            "second_pass_min_duration": kwargs.get("second_pass_min_duration", 5.0)
         }
     }
 
