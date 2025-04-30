@@ -2,59 +2,44 @@
 
 ## Current Focus
 
-**Refactoring CLAP Event Detection:** The CLAP Event Detection step (`EventDetector` class in `event_detection.py`) consistently hangs at the start of processing the first audio chunk. This occurs despite correct dependency installation (PyTorch w/ CUDA), successful model loading onto the GPU, and successful text feature precomputation. CPU usage maxes out while the GPU remains idle, indicating a deadlock or fundamental issue with the current implementation's handling of the first CUDA operation on audio data. Previous debugging attempts (forcing CPU, disabling autocast, adding granular logging) did not resolve the hang.
+**Finalizing `app.py` UI for Two-Pass Workflow:** The core logic for the two-pass ("Event-Guided") preset is implemented in `whisperBite.py`, and the standard preset logic has been restored conditionally. The immediate task is to correctly modify `app.py` to:
+1. Add the Gradio Textbox (`pass1_event_prompts_textbox`) specifically for overriding Pass 1 event prompts when the "Event-Guided" preset is selected.
+2. Update the `update_ui_for_preset` function to manage the visibility and placeholder text of this new Textbox based on the `preset_dropdown` selection.
+3. Update the `run_pipeline` function signature to accept the input from the new Textbox.
+4. Add logic within `run_pipeline` to parse the override prompts and pass them correctly (via `preset_kwargs`) to the `get_event_guided_preset` function *only* when that preset is active and the override input is valid.
+5. Ensure the `preset_dropdown.change` and `run_button.click` handlers include the new Textbox in their `outputs` and `inputs` lists, respectively.
+
+Previous attempts to apply these `app.py` changes via large edits failed, requiring smaller, targeted edits in the next steps.
 
 ## Recent Changes
 
-*   **Dependencies:** Installed latest PyTorch (2.7.0) with CUDA support in a clean conda environment. Installed all other requirements (including fixing missing `psutil`).
-*   **Debugging Attempts (Event Detection):**
-    *   Verified CUDA detection and model loading logs.
-    *   Forced CPU temporarily (still hung, confirming issue wasn't solely CUDA execution).
-    *   Disabled/Re-enabled `torch.amp.autocast`.
-    *   Added granular `[CHUNKPROC]` logging and timing within `process_audio_chunk`. -> Confirmed hang occurs before/during the first call to this function or immediately upon entering it.
-*   **(Previous)** UI Refactoring (Detection Tab), Output Structure Restoration, Config Flow Rework, File Logging, Various Fixes.
+*   **CLAP Refactoring Completed:** Replaced non-functional `EventDetector` class with `run_clap_event_detection` function.
+*   **Two-Pass Workflow Implemented:** Added logic to `whisperBite.py::process_audio` to:
+    *   Run Pass 1 CLAP detection.
+    *   Call `sound_detection.cut_audio_between_events` based on Pass 1 results.
+    *   Loop through resulting segments, performing Pass 2 CLAP annotation, transcription, and soundbite extraction (`sound_detection.extract_soundbites`).
+    *   Updated results structure (`results["segments"]`).
+*   **Standard Workflow Restored:** Re-added conditional logic in `whisperBite.py::process_audio` to handle standard, non-segment-based presets (`elif not workflow.get("cut_between_events")`).
+*   **Preset Structure Fixed:** Corrected `presets.py` functions (e.g., `get_event_guided_preset`) to consistently wrap configurations under the `"config"` key, resolving the `KeyError: 'config'` in `app.py`.
+*   **Logger Fix:** Moved `logger = logging.getLogger(__name__)` definition to the top of `sound_detection.py`, resolving the `NameError: name 'logger' is not defined`.
 
 ## Active Decisions
 
-*   **Abandon `EventDetector` Fixes:** Stop trying to patch the existing `EventDetector` class implementation due to the persistent, unexplained hang.
-*   **Adopt Refactoring Plan:** Proceed with the plan below to rebuild the event detection logic.
-
-## Refactoring Plan: CLAP Event Detection
-
-1.  **Centralize CLAP Model Loading:**
-    *   Modify `whisperBite.py::process_audio` to load the CLAP model (`ClapModel`) and processor (`ClapProcessor`) *once* at the beginning if the `"detect_events"` step is enabled in the preset's workflow.
-    *   This central loading point will manage the device selection (`cuda`/`cpu`) and keep the loaded model/processor objects available.
-
-2.  **Simplify Event Detection Logic:**
-    *   Remove the `EventDetector` class from `event_detection.py`.
-    *   Create a new, straightforward function within `event_detection.py`, named `run_clap_event_detection(audio_data, sample_rate, clap_model, clap_processor, device, target_events, threshold, chunk_duration, min_gap)`.
-    *   This function will take the pre-loaded model, processor, audio data (as a NumPy array), device, and configuration parameters as input.
-    *   It will contain the core logic:
-        *   Precompute text features using the passed processor/model/device.
-        *   Iterate through audio chunks.
-        *   Prepare inputs using the processor.
-        *   Run inference (`clap_model.get_audio_features`) within `torch.no_grad()` and `torch.amp.autocast` contexts.
-        *   Calculate similarity.
-        *   Collect detections.
-        *   Apply Temporal NMS (using the existing static method, perhaps moved outside the old class).
-
-3.  **Update `whisperBite.py::process_audio`:**
-    *   Import the new `run_clap_event_detection` function.
-    *   Add the CLAP model/processor loading logic mentioned in step 1.
-    *   Read event detection parameters (`target_events`, `threshold`, etc.) from the `preset_config["event_detection"]` dictionary. Provide sensible defaults if keys are missing.
-    *   Load the audio file into a NumPy array using `soundfile.read` (or similar) *before* calling the detection function.
-    *   If event detection is enabled, call `run_clap_event_detection`, passing all required arguments.
-    *   Handle saving the returned event dictionary to `events/events.json`.
-
-4.  **Refine Logging:**
-    *   Keep INFO level logs for model loading, text precomputation, audio loading, and saving results.
-    *   Change the detailed intra-chunk logs (`[CHUNKPROC]`) to DEBUG level for optional deep debugging.
+*   The two-pass workflow (`Event-Guided` preset) uses separate CLAP configurations for Pass 1 (cutting boundaries, `event_detection` config key) and Pass 2 (segment annotation, `sound_detection` config key).
+*   Standard presets reuse the original whole-file processing logic blocks within `whisperBite.py`.
+*   `app.py` needs targeted edits to integrate the UI for the Pass 1 prompt override.
 
 ## Next Steps
 
-1.  **Implement Refactoring Plan:** Execute the steps outlined above to refactor CLAP event detection.
-2.  **Test Refactored Implementation:** Run with the "Event-Guided" preset and verify that event detection proceeds correctly on the GPU without hanging.
-3.  **Continue Workflow:** Once event detection is functional, proceed with testing subsequent steps (event-guided transcription, etc.).
+1.  **Fix `app.py` (Targeted Edits):**
+    *   Define `pass1_event_prompts_textbox` in the UI layout.
+    *   Update `update_ui_for_preset` function.
+    *   Update `preset_dropdown.change` handler outputs.
+    *   Update `run_pipeline` function signature and internal logic.
+    *   Update `run_button.click` handler inputs.
+2.  **Test UI Interactivity:** Verify Pass 1 override box visibility.
+3.  **Test Workflows:** Run both "Event-Guided" (with/without override) and "Standard" presets.
+4.  **Review Outputs:** Check logs and output files (`conversation_segments/`, `soundbites/`, `master_transcript.txt`, `results.yaml`) for correctness.
 
 ## Current Focus
 

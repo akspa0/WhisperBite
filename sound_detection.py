@@ -13,6 +13,10 @@ from tqdm import tqdm
 import psutil
 import math
 import threading
+import re
+
+# <<< Moved logger definition here >>>
+logger = logging.getLogger(__name__)
 
 def check_ffmpeg_available() -> bool:
     """Check if ffmpeg is available in the system."""
@@ -685,6 +689,181 @@ def detect_sound_events(
 
     return detected_events
 
+def cut_audio_between_events(audio_path: str, all_events: Dict[str, List[Dict]], output_dir: str,
+                           start_types=("ringing phone",), end_types=("hang-up tones",),
+                           min_duration_s=2.0, padding_ms=500) -> List[Dict]:
+    """
+    Cuts audio into segments based on pairs of end/start events.
+    Extracts audio *between* the end of an 'end_type' event and the start of the *next* 'start_type' event.
+
+    Args:
+        audio_path (str): Path to the original audio file.
+        all_events (Dict[str, List[Dict]]): Dictionary of detected events from Pass 1, 
+                                           e.g., {'ringing phone': [...], 'hang-up tones': [...]}.
+        output_dir (str): Directory to save the cut conversation segments.
+        start_types (tuple): Event types marking the beginning of a segment boundary.
+        end_types (tuple): Event types marking the end of a segment boundary.
+        min_duration_s (float): Minimum duration in seconds for a segment to be saved.
+        padding_ms (int): Padding in milliseconds added after the end_event and before the start_event.
+
+    Returns:
+        List[Dict]: List of dictionaries for each saved segment, containing 
+                    {'path': str, 'start': float, 'end': float, 'duration': float}.
+    """
+    logger.info(f"Cutting audio between events: start_types={start_types}, end_types={end_types}")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    relevant_events = []
+    for event_type, events_list in all_events.items():
+        if event_type in start_types or event_type in end_types:
+            relevant_events.extend(events_list)
+
+    if not relevant_events:
+        logger.warning("No relevant start/end events found for cutting.")
+        return []
+
+    # Sort all relevant events by start time
+    relevant_events.sort(key=lambda x: x['start'])
+
+    saved_segments = []
+    try:
+        audio = AudioSegment.from_file(audio_path)
+        audio_duration_ms = len(audio)
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        segment_index = 0
+
+        last_end_event = None
+        for i, current_event in enumerate(relevant_events):
+            # Look for an end event
+            if current_event['type'] in end_types:
+                last_end_event = current_event
+                logger.debug(f"Found potential end event: {last_end_event['type']} at {last_end_event['start']:.2f}s")
+                continue # Move to the next event to find the corresponding start
+            
+            # If we have found an end event, look for the *next* start event
+            if last_end_event and current_event['type'] in start_types:
+                start_event = current_event
+                logger.debug(f"Found potential start event: {start_event['type']} at {start_event['start']:.2f}s after end event at {last_end_event['start']:.2f}s")
+                
+                # Define cut boundaries with padding
+                cut_start_ms = int(last_end_event['end'] * 1000) + padding_ms
+                cut_end_ms = int(start_event['start'] * 1000) - padding_ms
+
+                # Ensure boundaries are valid and start < end
+                cut_start_ms = max(0, cut_start_ms)
+                cut_end_ms = min(audio_duration_ms, cut_end_ms)
+                
+                segment_duration_s = (cut_end_ms - cut_start_ms) / 1000.0
+
+                if segment_duration_s >= min_duration_s:
+                    logger.info(f"  -> Extracting segment {segment_index}: {cut_start_ms/1000.0:.2f}s - {cut_end_ms/1000.0:.2f}s (Duration: {segment_duration_s:.2f}s)")
+                    segment_audio = audio[cut_start_ms:cut_end_ms]
+                    
+                    segment_filename = f"{segment_index:04d}_conv_{int(cut_start_ms/1000.0)}_{int(cut_end_ms/1000.0)}.wav"
+                    segment_path = os.path.join(output_dir, segment_filename)
+                    
+                    # Export the segment
+                    segment_audio.export(segment_path, format="wav")
+                    
+                    saved_segments.append({
+                        'path': segment_path,
+                        'start': cut_start_ms / 1000.0,
+                        'end': cut_end_ms / 1000.0,
+                        'duration': segment_duration_s
+                    })
+                    segment_index += 1
+                else:
+                    logger.debug(f"  -> Skipping segment between {last_end_event['end']:.2f}s and {start_event['start']:.2f}s: Duration {segment_duration_s:.2f}s < {min_duration_s}s")
+
+                # Reset last_end_event, as we've found its corresponding start and cut the segment
+                last_end_event = None 
+            
+            # If the current event is a start event but we haven't seen an end event yet, 
+            # it might mark the beginning of the audio before the first hangup, 
+            # or it might be an isolated start. Handled by requiring last_end_event to be set.
+
+    except Exception as e:
+        logger.error(f"Error during audio cutting between events: {e}", exc_info=True)
+        return [] # Return empty list on error
+
+    logger.info(f"Finished cutting between events. Saved {len(saved_segments)} segments.")
+    return saved_segments
+
+def extract_soundbites(segment_audio_path: str, segment_annotations: Dict[str, List[Dict]], 
+                       output_dir: str, base_filename: str, 
+                       min_duration_s=0.2, padding_ms=150, confidence_threshold=0.3) -> List[str]:
+    """
+    Extracts small audio clips (soundbites) based on Pass 2 CLAP detections.
+
+    Args:
+        segment_audio_path (str): Path to the conversation segment audio file.
+        segment_annotations (Dict[str, List[Dict]]): Detections from Pass 2 CLAP for this segment.
+                                                     e.g., {'speech': [...], 'laughter': [...]}
+        output_dir (str): Directory to save extracted soundbites.
+        base_filename (str): Base name derived from the segment file (used for soundbite naming).
+        min_duration_s (float): Minimum duration for an extracted soundbite.
+        padding_ms (int): Padding added around the detected event time for extraction.
+        confidence_threshold (float): Minimum confidence for a detection to be extracted.
+
+    Returns:
+        List[str]: List of paths to the created soundbite files.
+    """
+    logger.info(f"Extracting soundbites for {os.path.basename(segment_audio_path)}...")
+    os.makedirs(output_dir, exist_ok=True)
+    soundbite_paths = []
+    soundbite_index = 0
+
+    try:
+        segment_audio = AudioSegment.from_file(segment_audio_path)
+        segment_duration_ms = len(segment_audio)
+    except Exception as e:
+        logger.error(f"Could not load segment audio {segment_audio_path} for soundbite extraction: {e}")
+        return []
+
+    for event_type, detections in segment_annotations.items():
+        for detection in detections:
+            try:
+                confidence = detection.get('confidence', 0)
+                if confidence < confidence_threshold:
+                    continue
+
+                start_s = detection['start']
+                end_s = detection['end']
+                duration_s = end_s - start_s
+
+                if duration_s < min_duration_s:
+                    continue
+
+                # Calculate padded boundaries (relative to the segment)
+                extract_start_ms = max(0, int(start_s * 1000) - padding_ms)
+                extract_end_ms = min(segment_duration_ms, int(end_s * 1000) + padding_ms)
+                
+                # Extract with padding
+                soundbite_audio = segment_audio[extract_start_ms:extract_end_ms]
+                
+                # Simple sanitization for filename
+                safe_event_type = re.sub(r'[\s\/:]', '_', event_type)
+
+                # Filename: [detected_term]_[base_filename]_[start_sec]_[end_sec].wav
+                soundbite_filename = f"[{safe_event_type}]_{base_filename}_{int(start_s)}_{int(end_s)}_{soundbite_index:03d}.wav"
+                soundbite_path = os.path.join(output_dir, soundbite_filename)
+                
+                # Apply fade
+                fade_duration = min(50, soundbite_audio.duration_seconds * 1000 / 4) 
+                soundbite_audio = soundbite_audio.fade_in(int(fade_duration)).fade_out(int(fade_duration))
+
+                # Export
+                soundbite_audio.export(soundbite_path, format="wav")
+                soundbite_paths.append(soundbite_path)
+                soundbite_index += 1
+                logger.debug(f"  -> Extracted soundbite: {soundbite_path}")
+
+            except Exception as e:
+                logger.warning(f"Error extracting soundbite for detection {detection}: {e}")
+                continue
+
+    logger.info(f"Extracted {len(soundbite_paths)} soundbites for {os.path.basename(segment_audio_path)}.")
+    return soundbite_paths
 
 # Example Usage (for testing purposes)
 if __name__ == '__main__':

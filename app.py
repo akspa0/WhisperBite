@@ -16,10 +16,15 @@ from presets import (
     get_standard_preset,
     get_transcription_preset,
     get_event_guided_preset,
-    get_preset_by_name
+    get_preset_by_name,
+    DEFAULT_EVENTS, # Import defaults
+    DEFAULT_CALL_THRESHOLD,
+    DEFAULT_CALL_CHUNK_DURATION,
+    TARGET_SOUND_PROMPTS
 )
 import datetime # For timestamp
 from utils import sanitize_filename # For sanitizing filename
+import torch
 
 # Configure basic logging for the app
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -182,7 +187,8 @@ def process_wrapper(
     event_min_gap,
     clap_target_prompts_input,
     clap_threshold_input,
-    clap_chunk_duration_input
+    clap_chunk_duration_input,
+    pass1_event_prompts_override
 ):
     """Wrapper function to handle Gradio interface inputs."""
     global current_job, stop_requested, processing_stop_event
@@ -251,6 +257,18 @@ def process_wrapper(
             "clap_chunk_duration": clap_chunk_duration_input
         }
 
+        # <<< Add Pass 1 prompts override for Event-Guided preset >>>
+        if preset == "Event-Guided" and pass1_event_prompts_override:
+            custom_pass1_prompts = [p.strip() for p in pass1_event_prompts_override.split(',') if p.strip()]
+            if custom_pass1_prompts: # Only override if the user actually typed something valid
+                # Ensure event_detection key exists before assigning
+                if 'event_detection' not in preset_kwargs:
+                     preset_kwargs['event_detection'] = {}
+                preset_kwargs['event_detection']['target_events'] = custom_pass1_prompts # Key matches the one expected in get_event_guided_preset
+                logger.info(f"Using custom Pass 1 event prompts: {custom_pass1_prompts}")
+            else:
+                logger.info("Custom Pass 1 prompts field was empty or invalid, using default preset prompts.")
+
         # Call run_pipeline with the unique run directory
         results = run_pipeline(
             input_file=file_path,
@@ -289,6 +307,60 @@ def process_wrapper(
         logger.exception("Error in process_wrapper")
         error_message = str(e)
         return f"Wrapper Error: {error_message}", None, None # Return 3 values on wrapper error
+
+def update_ui_for_preset(preset_name):
+    # Get the selected preset configuration
+    preset_data = get_preset_by_name(preset_name)
+    config = preset_data.get('config', {})
+    workflow = config.get('workflow', {})
+    event_cfg = config.get('event_detection', {})
+    sound_cfg = config.get('sound_detection', {})
+    # trans_cfg = config.get('transcription', {})
+    # sep_cfg = config.get('vocal_separation', {})
+
+    # Determine visibility/values based on preset workflow flags
+    # Use .get() with defaults for safety
+    event_detect_visible = workflow.get('detect_events', False)
+    sound_detect_visible = workflow.get('detect_sounds', False)
+    # Add visibility checks for other potential sections if needed
+    # transcription_visible = workflow.get('transcribe', False)
+    # separation_visible = workflow.get('separate_vocals', False)
+    
+    # <<< Specific check for Event-Guided preset >>>
+    event_guided_specific_visible = preset_name == "Event-Guided"
+
+    # Default values from preset configs or constants
+    default_event_threshold = event_cfg.get('threshold', 0.5)
+    default_event_min_gap = event_cfg.get('min_duration', 1.0) # Key in preset is min_duration
+    default_event_prompts = ",".join(event_cfg.get('target_events', DEFAULT_EVENTS)) # Use imported default
+    
+    default_sound_threshold = sound_cfg.get('threshold', DEFAULT_CALL_THRESHOLD) # Use imported default
+    default_sound_chunk_duration = sound_cfg.get('chunk_duration_s', DEFAULT_CALL_CHUNK_DURATION) # Use imported default
+    default_sound_prompts = ",".join(sound_cfg.get('target_prompts', TARGET_SOUND_PROMPTS)) # Use imported default
+    
+    # <<< Default placeholder for Pass 1 override >>>
+    # Get the specific default Pass 1 prompts for the placeholder
+    # Accessing the specific preset directly might be simpler here
+    default_pass1_placeholder_prompts = ",".join(get_event_guided_preset().get('config', {}).get('event_detection', {}).get('target_events', ["ringing phone", "hang-up tones"]))
+
+    # Return updates for relevant components
+    # <<< Return as a TUPLE in the exact order expected by preset.change outputs >>>
+    # Ensure no trailing whitespace or explicit \ characters on these lines
+    return (
+        # Event Detection Components (Order: prompts, threshold, min_gap)
+        gr.update(placeholder=default_event_prompts, value="", interactive=event_detect_visible),
+        gr.update(value=default_event_threshold, interactive=event_detect_visible),
+        gr.update(value=default_event_min_gap, interactive=event_detect_visible),
+        
+        # Sound Detection Components (Order: prompts, threshold, chunk_duration)
+        gr.update(placeholder=default_sound_prompts, value="", interactive=sound_detect_visible),
+        gr.update(value=default_sound_threshold, interactive=sound_detect_visible),
+        gr.update(value=default_sound_chunk_duration, interactive=sound_detect_visible),
+        
+        # Pass 1 Settings (Order: accordion, textbox)
+        gr.update(visible=event_guided_specific_visible),
+        gr.update(visible=event_guided_specific_visible, placeholder=default_pass1_placeholder_prompts, value="")
+    )
 
 # Gradio interface
 def build_interface():
@@ -437,6 +509,17 @@ def build_interface():
                             interactive=False # Depends on preset
                         )
 
+                # <<< Add Textbox for Pass 1 Override >>>
+                with gr.Accordion("Event-Guided Pass 1 Settings", open=False, visible=False) as pass1_settings_accordion: # Start closed and hidden
+                    pass1_event_prompts_textbox = gr.Textbox(
+                        label="Pass 1 Event Prompts (Overrides standard Event Prompts, comma-separated)",
+                        placeholder="ringing phone,hang-up tones",
+                        interactive=True,
+                        # Visibility controlled by preset.change
+                        lines=1
+                    )
+                # <<< End Pass 1 Override >>>
+
         with gr.Row():
             submit_button = gr.Button("Process Audio", variant="primary")
             stop_button = gr.Button("Stop Processing", variant="stop")
@@ -467,41 +550,9 @@ def build_interface():
             outputs=second_pass_min_duration
         )
 
-        # NEW: Link Preset dropdown to Detection tab controls
-        def update_detection_interactivity(preset_name):
-            try:
-                preset_data = get_preset_by_name(preset_name)
-                workflow = preset_data.get("config", {}).get("workflow", {})
-                
-                event_detect_enabled = workflow.get("detect_events", False)
-                sound_detect_enabled = workflow.get("detect_sounds", False)
-                
-                # Update Event Detection Group
-                event_updates = [
-                    gr.update(interactive=event_detect_enabled),
-                    gr.update(interactive=event_detect_enabled),
-                    gr.update(interactive=event_detect_enabled)
-                ]
-                
-                # Update Sound Detection Group
-                sound_updates = [
-                    gr.update(interactive=sound_detect_enabled),
-                    gr.update(interactive=sound_detect_enabled),
-                    gr.update(interactive=sound_detect_enabled)
-                ]
-                
-                # Combine updates for all controls in order
-                # Order: event_target_prompts, event_threshold, event_min_gap, 
-                #        clap_target_prompts, clap_threshold, clap_chunk_duration
-                return tuple(event_updates + sound_updates)
-
-            except Exception as e:
-                logger.error(f"Error updating detection interactivity for preset '{preset_name}': {e}")
-                # Return updates to disable everything on error
-                return tuple([gr.update(interactive=False)] * 6) 
-
+        # <<< Link Preset dropdown to the corrected update function and ensure outputs match >>>
         preset.change(
-            fn=update_detection_interactivity,
+            fn=update_ui_for_preset, # Call the correct update function
             inputs=preset,
             outputs=[
                 # Event Detection Controls
@@ -511,7 +562,10 @@ def build_interface():
                 # Sound Detection Controls
                 clap_target_prompts_input,
                 clap_threshold_input,
-                clap_chunk_duration_input
+                clap_chunk_duration_input,
+                # Pass 1 Settings
+                pass1_settings_accordion,
+                pass1_event_prompts_textbox
             ]
         )
         
@@ -542,7 +596,9 @@ def build_interface():
                 event_min_gap,
                 clap_target_prompts_input,
                 clap_threshold_input,
-                clap_chunk_duration_input
+                clap_chunk_duration_input,
+                # New Pass 1 Prompts Override
+                pass1_event_prompts_textbox
             ],
             outputs=[output_message, result_file, transcript_preview]
         )
