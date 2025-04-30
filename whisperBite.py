@@ -953,6 +953,10 @@ def process_audio(
     if workflow.get("cut_between_events") and conversation_segments:
         logging.info(f"--- Processing {len(conversation_segments)} conversation segments ---")
         base_conversation_dir = os.path.join(output_dir, "conversation_segments") # Base dir for all segments
+        # <<< Define and create central soundbites directory >>>
+        central_soundbites_dir = os.path.join(output_dir, "soundbites")
+        os.makedirs(central_soundbites_dir, exist_ok=True)
+        relative_soundbites_dir_path = os.path.relpath(central_soundbites_dir, output_dir)
         
         for idx, segment_info in enumerate(conversation_segments):
             if stop_event and stop_event.is_set(): 
@@ -1135,22 +1139,24 @@ def process_audio(
                     min_duration = soundbite_config.get("min_bite_duration", 0.2)
                     padding = soundbite_config.get("bite_padding_ms", 150)
                     
-                    soundbites_output_dir = os.path.join(segment_output_dir, "soundbites")
+                    # <<< Save soundbites to the central directory >>>
+                    # soundbites_output_dir = os.path.join(segment_output_dir, "soundbites") # Old location
                     # Use segment filename without extension as base
                     segment_base_name = os.path.splitext(os.path.basename(segment_abs_path))[0]
                     
                     extracted_bite_paths = extract_soundbites(
                         segment_audio_path=audio_source_for_processing, # Use vocals if available
                         segment_annotations=segment_results["pass2_annotations"],
-                        output_dir=soundbites_output_dir,
+                        output_dir=central_soundbites_dir, # <<< Use central dir >>>
                         base_filename=f"seg{idx:04d}_{segment_base_name}",
                         min_duration_s=min_duration,
                         padding_ms=padding,
                         confidence_threshold=confidence_thresh
                     )
-                    segment_results["soundbites_dir"] = os.path.relpath(soundbites_output_dir, output_dir)
+                    # <<< Store relative path to the central directory >>>
+                    segment_results["soundbites_dir"] = relative_soundbites_dir_path 
                     segment_results["soundbites"] = [os.path.relpath(p, output_dir) for p in extracted_bite_paths]
-                    logging.info(f"Extracted {len(extracted_bite_paths)} soundbites for segment {idx}.")
+                    logging.info(f"Extracted {len(extracted_bite_paths)} soundbites for segment {idx} to {central_soundbites_dir}.") # Log central dir
                 except Exception as e:
                      logging.error(f"Error during soundbite extraction for segment {idx}: {e}", exc_info=True)
                      segment_results["status"] = "error_soundbites"
@@ -1349,18 +1355,58 @@ def process_audio(
     master_transcript_path = os.path.join(output_dir, "master_transcript.txt")
     try:
         with open(master_transcript_path, "w", encoding='utf-8') as f:
-            # ... (Keep master transcript generation logic from previous step) ...
-            # It should correctly handle results["segments"] if populated, 
-            # or fallback to results["transcription"]["text"] if not.
             f.write(f"Master Transcript for: {os.path.basename(results['input_file'])}\\n")
             f.write(f"Preset: {results['preset']}\\n")
             f.write(f"Processed: {results['processing_time']}\\n\\n")
+            
             if results.get("segments"):
-                 f.write(f"Segments Processed: {len(results['segments'])}\\n\\n")
+                 segments_to_write = sorted(results["segments"], key=lambda x: x.get('start_original', 0))
+                 f.write(f"Segments Processed: {len(segments_to_write)}\\n\\n")
                  f.write("="*20 + "\\n\\n")
-                 for seg_res in results["segments"]:
-                    # ... (Write segment info, annotations, transcription, soundbites) ...
-                    pass # Placeholder for brevity
+                 for seg_res in segments_to_write:
+                    # --- Write Segment Information to Master Transcript ---
+                    segment_index = seg_res.get("segment_index", "N/A")
+                    start_time = seg_res.get("start_original", 0)
+                    end_time = seg_res.get("end_original", 0)
+                    status = seg_res.get("status")
+                    
+                    f.write(f"--- Segment {segment_index} ({start_time:.2f}s - {end_time:.2f}s) ---\\n")
+                    f.write(f"Status: {status}\\n")
+                    
+                    transcript_text = "(Transcription not available or failed)"
+                    # Prioritize reading from the saved text file if it exists
+                    transcript_file_rel = seg_res.get("transcription_path")
+                    if transcript_file_rel:
+                        transcript_file_abs = os.path.join(output_dir, transcript_file_rel)
+                        if os.path.exists(transcript_file_abs):
+                            try:
+                                with open(transcript_file_abs, 'r', encoding='utf-8') as ts_f:
+                                    # Skip the header line (line 0) and blank line (line 1)
+                                    lines = ts_f.readlines()
+                                    if len(lines) > 2:
+                                        transcript_text = "".join(lines[2:]).strip()
+                                    elif len(lines) == 1: # Only header
+                                        transcript_text = "(Transcript file only contained header)"
+                                    elif len(lines) == 2: # Header + blank line
+                                         transcript_text = "(Transcript file contained header and blank line only)"
+                                    else: # Empty file?
+                                         transcript_text = "(Empty transcript file)"
+                            except Exception as read_err:
+                                transcript_text = f"(Error reading transcript file: {read_err})"
+                        else:
+                            transcript_text = "(Transcript file not found)"
+                    # Fallback to text stored in results if file path missing or failed
+                    elif seg_res.get("transcription_details") and isinstance(seg_res["transcription_details"], dict):
+                        transcript_text = seg_res["transcription_details"].get("text", transcript_text)
+                        
+                    f.write(f"Transcription:\\n{transcript_text.strip()}\\n")
+                    
+                    # Optionally add annotation summary or soundbite info here too
+                    num_soundbites = len(seg_res.get("soundbites", []))
+                    f.write(f"Soundbites Extracted: {num_soundbites}\\n")
+                    f.write("\\n" + "-"*20 + "\\n\\n") # Separator
+                    # --- End Segment Information ---
+                    
             elif results.get("transcription") and isinstance(results["transcription"], dict) and "text" in results["transcription"]:
                  f.write("Full Transcription:\\n")
                  f.write(results["transcription"]["text"]) # Write full text if no segments

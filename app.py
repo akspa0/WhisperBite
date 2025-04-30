@@ -261,13 +261,12 @@ def process_wrapper(
         if preset == "Event-Guided" and pass1_event_prompts_override:
             custom_pass1_prompts = [p.strip() for p in pass1_event_prompts_override.split(',') if p.strip()]
             if custom_pass1_prompts: # Only override if the user actually typed something valid
-                # Ensure event_detection key exists before assigning
-                if 'event_detection' not in preset_kwargs:
-                     preset_kwargs['event_detection'] = {}
-                preset_kwargs['event_detection']['target_events'] = custom_pass1_prompts # Key matches the one expected in get_event_guided_preset
+                # <<< Use the direct key expected by get_event_guided_preset >>>
+                preset_kwargs['event_target_prompts'] = custom_pass1_prompts 
                 logger.info(f"Using custom Pass 1 event prompts: {custom_pass1_prompts}")
             else:
                 logger.info("Custom Pass 1 prompts field was empty or invalid, using default preset prompts.")
+        # <<< End Pass 1 Override Logic >>>
 
         # Call run_pipeline with the unique run directory
         results = run_pipeline(
@@ -321,8 +320,8 @@ def update_ui_for_preset(preset_name):
     # Determine visibility/values based on preset workflow flags
     # Use .get() with defaults for safety
     event_detect_visible = workflow.get('detect_events', False)
-    sound_detect_visible = workflow.get('detect_sounds', False)
-    # Add visibility checks for other potential sections if needed
+    # <<< Base sound detection visibility/interactivity on 'annotate_segments' flag >>>
+    sound_detect_controls_interactive = workflow.get('annotate_segments', False) 
     # transcription_visible = workflow.get('transcribe', False)
     # separation_visible = workflow.get('separate_vocals', False)
     
@@ -353,9 +352,9 @@ def update_ui_for_preset(preset_name):
         gr.update(value=default_event_min_gap, interactive=event_detect_visible),
         
         # Sound Detection Components (Order: prompts, threshold, chunk_duration)
-        gr.update(placeholder=default_sound_prompts, value="", interactive=sound_detect_visible),
-        gr.update(value=default_sound_threshold, interactive=sound_detect_visible),
-        gr.update(value=default_sound_chunk_duration, interactive=sound_detect_visible),
+        gr.update(placeholder=default_sound_prompts, value="", interactive=sound_detect_controls_interactive),
+        gr.update(value=default_sound_threshold, interactive=sound_detect_controls_interactive),
+        gr.update(value=default_sound_chunk_duration, interactive=sound_detect_controls_interactive),
         
         # Pass 1 Settings (Order: accordion, textbox)
         gr.update(visible=event_guided_specific_visible),
