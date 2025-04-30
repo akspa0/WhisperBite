@@ -15,8 +15,11 @@ from typing import Dict, Any, Optional, List
 from presets import (
     get_standard_preset,
     get_transcription_preset,
-    get_event_guided_preset
+    get_event_guided_preset,
+    get_preset_by_name
 )
+import datetime # For timestamp
+from utils import sanitize_filename # For sanitizing filename
 
 # Configure basic logging for the app
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -60,8 +63,30 @@ def run_pipeline(
     global current_job, stop_requested, processing_stop_event
     stop_requested = False
     processing_stop_event = threading.Event()
+    file_handler = None # Initialize file handler variable
     
     try:
+        # --- Create Unique Output Directory (Moved from process_wrapper) --- 
+        # This ensures the log file path is determined before logging starts for the run
+        base_output_folder = output_dir # Expecting unique dir path from wrapper now
+        if not os.path.exists(base_output_folder):
+            try:
+                os.makedirs(base_output_folder, exist_ok=True)
+                logger.info(f"Created output directory: {base_output_folder}")
+            except OSError as e:
+                 logger.error(f"Failed to create output directory {base_output_folder}: {e}")
+                 # Return error early if dir creation fails
+                 return {"status": "error", "error": f"Failed to create output dir: {e}"}
+                 
+        # --- Setup File Logging for this run --- 
+        log_file_path = os.path.join(base_output_folder, "processing.log")
+        file_handler = logging.FileHandler(log_file_path, mode='w') # 'w' to overwrite previous logs if run dir reused (shouldn't happen)
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+        file_handler.setFormatter(formatter)
+        logging.getLogger().addHandler(file_handler) # Add handler to root logger
+        logger.info(f"Logging for this run will be saved to: {log_file_path}")
+        # --- End File Logging Setup ---
+        
         # Get preset configuration
         preset_funcs = {
             "Standard": get_standard_preset,
@@ -73,21 +98,24 @@ def run_pipeline(
             raise ValueError(f"Unknown preset: {preset_name}")
             
         preset = preset_funcs[preset_name](**kwargs)
+        logger.info(f"Using preset: {preset_name}")
+        logger.debug(f"Preset config generated: {preset}")
         
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
+        # Create output directory if it doesn't exist (redundant check, but safe)
+        # os.makedirs(output_dir, exist_ok=True) # Output dir is now base_output_folder
         
         # Save preset configuration
-        config_path = os.path.join(output_dir, "config.yaml")
+        config_path = os.path.join(base_output_folder, "config.yaml")
         with open(config_path, "w") as f:
             yaml.dump(preset, f)
+        logger.info(f"Saved preset config to: {config_path}")
             
         # Process audio with preset configuration
         results = process_audio(
-            input_file=input_file,
-            output_dir=output_dir,
-            preset_name=preset_name,
-            preset_config=preset["config"],
+            input_file=input_file, 
+            output_dir=base_output_folder, # Pass the unique run directory
+            preset_name=preset_name, 
+            preset_config=preset["config"], 
             stop_event=processing_stop_event
         )
         
@@ -98,19 +126,40 @@ def run_pipeline(
              # For now, treat as success but maybe add a note
              results['status'] = 'stopped_post_processing'
 
+        # Ensure results dictionary is returned even if process_audio had issues internally
+        if not isinstance(results, dict):
+             logger.error(f"process_audio returned unexpected type: {type(results)}")
+             results = {"status": "error", "error": "Internal processing function error."}
+
+        # Add paths relative to the run directory if possible
+        # Example: (adjust keys based on actual results dict from process_audio)
+        if results.get("status") not in ["error", "cancelled", "stopped_post_processing"]:
+            results["output_run_directory"] = base_output_folder
+            # Add other key paths if needed
+
+        # Update status based on process_audio result before returning
+        final_status = results.get("status", "unknown")
+
         return {
-            "status": "success",
+            "status": final_status, 
             "preset_used": preset_name,
             "config_file": config_path,
             **results
         }
         
     except Exception as e:
-        logger.exception("Error in processing pipeline")
+        logger.exception("Error in processing pipeline (run_pipeline)")
         return {
             "status": "error",
             "error": str(e)
         }
+    finally:
+        # --- Remove File Handler for this run --- 
+        if file_handler:
+            logger.info(f"Removing file handler for {log_file_path}")
+            logging.getLogger().removeHandler(file_handler)
+            file_handler.close()
+        # --- End File Handler Removal ---
 
 def process_wrapper(
     input_file,
@@ -124,20 +173,28 @@ def process_wrapper(
     enable_word_extraction,
     enable_second_pass,
     second_pass_min_duration,
-    attempt_sound_detection,
     hf_token,
     split_stereo,
-    clap_chunk_duration,
-    clap_threshold,
-    clap_target_prompts,
     force_mono_output,
-    preset
+    preset,
+    event_target_prompts_input,
+    event_threshold,
+    event_min_gap,
+    clap_target_prompts_input,
+    clap_threshold_input,
+    clap_chunk_duration_input
 ):
     """Wrapper function to handle Gradio interface inputs."""
+    global current_job, stop_requested, processing_stop_event
+    stop_requested = False
+    processing_stop_event = threading.Event() # Ensure event is reset/created for the job
+    
     try:
         # Determine input file path
+        input_source_description = ""
         if input_file is not None:
             file_path = input_file.name
+            input_source_description = os.path.basename(file_path)
         elif input_folder:
             # Get newest file from folder
             files = [(os.path.getmtime(os.path.join(input_folder, f)), os.path.join(input_folder, f))
@@ -145,6 +202,7 @@ def process_wrapper(
             if not files:
                 return {"status": "error", "error": "No files found in input folder"}
             file_path = max(files)[1]
+            input_source_description = os.path.basename(file_path)
         elif url:
             # Download from URL
             download_dir = os.path.join(output_folder, "downloads")
@@ -152,9 +210,27 @@ def process_wrapper(
             file_path = download_audio(url, download_dir)
             if not file_path:
                 return {"status": "error", "error": "Failed to download audio from URL"}
+            # Try to get a reasonable name from URL or downloaded file
+            input_source_description = os.path.basename(file_path) if file_path else url.split('/')[-1]
         else:
             return {"status": "error", "error": "Please provide an input file, folder, or URL"}
 
+        # Create Unique Output Directory
+        base_output_folder = output_folder # The folder selected in UI
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        sanitized_input_name = sanitize_filename(os.path.splitext(input_source_description)[0])
+        # Limit length of sanitized name to avoid overly long paths
+        max_name_len = 50 
+        unique_run_folder_name = f"{sanitized_input_name[:max_name_len]}_{timestamp}"
+        run_output_dir = os.path.join(base_output_folder, unique_run_folder_name)
+        
+        try:
+            os.makedirs(run_output_dir, exist_ok=True)
+            logger.info(f"Created unique output directory: {run_output_dir}")
+        except OSError as e:
+            logger.error(f"Failed to create output directory {run_output_dir}: {e}")
+            return f"Error creating output directory: {e}", None, None
+            
         # Prepare kwargs for preset configuration
         preset_kwargs = {
             "model": model,
@@ -164,19 +240,21 @@ def process_wrapper(
             "enable_word_extraction": enable_word_extraction,
             "enable_second_pass": enable_second_pass,
             "second_pass_min_duration": second_pass_min_duration,
-            "attempt_sound_detection": attempt_sound_detection,
             "hf_token": hf_token,
             "split_stereo": split_stereo,
-            "clap_chunk_duration": clap_chunk_duration,
-            "clap_threshold": clap_threshold,
-            "clap_target_prompts": clap_target_prompts.split(",") if clap_target_prompts else None,
-            "force_mono_output": force_mono_output
+            "force_mono_output": force_mono_output,
+            "event_target_prompts": [p.strip() for p in event_target_prompts_input.split(",") if p.strip()],
+            "event_threshold": event_threshold,
+            "event_min_gap": event_min_gap,
+            "clap_target_prompts": [p.strip() for p in clap_target_prompts_input.split(",") if p.strip()],
+            "clap_threshold": clap_threshold_input,
+            "clap_chunk_duration": clap_chunk_duration_input
         }
 
-        # Call run_pipeline with the correct arguments
+        # Call run_pipeline with the unique run directory
         results = run_pipeline(
             input_file=file_path,
-            output_dir=output_folder,
+            output_dir=run_output_dir,
             preset_name=preset,
             **preset_kwargs
         )
@@ -248,130 +326,117 @@ def build_interface():
                 )
                 
             with gr.TabItem("Processing Options"):
-                # <<< Add Preset Radio Buttons >>>
                 preset = gr.Dropdown(
                     choices=["Standard", "Transcription", "Event-Guided"],
                     value="Standard",
-                    label="Processing Preset"
+                    label="Processing Preset",
+                    info="Select a processing workflow. Detection options below depend on the chosen preset."
                 )
                 
-                # Standard Options (potentially hide/show based on mode later)
+                # Standard Options
                 with gr.Group(visible=True) as standard_options_group:
+                    gr.Markdown("### General Processing")
                     with gr.Row():
                         model = gr.Dropdown(
                             label="Whisper Model", 
                             choices=["tiny", "base", "small", "medium", "large", "large-v2", "large-v3", "turbo"],
-                            value="turbo", # Default set to turbo
+                            value="turbo", 
                             info="Larger models are more accurate but slower"
                         )
-                        
+                        hf_token = gr.Textbox(label="Hugging Face Token", type="password", info="Required for some models/diarization. huggingface.co/settings/tokens.")
+                    
+                    gr.Markdown("### Speaker Diarization")
+                    gr.HTML("<p style='font-size:small;color:grey'>Requires Pyannote & HF Token. Only runs if preset includes transcription/diarization.</p>") # Info text
+                    with gr.Row():
                         num_speakers = gr.Slider(
-                            label="Number of Speakers", 
-                            minimum=1, 
-                            maximum=10, 
-                            step=1, 
-                            value=2,
-                            info="Set expected number of speakers. Diarization uses Pyannote (requires HF token)."
+                            label="Number of Speakers", minimum=1, maximum=10, step=1, value=2,
+                            interactive=True # Assume enabled unless preset disables diarization
                         )
-                    with gr.Row():
                         auto_speakers = gr.Checkbox(
-                            label="Auto-detect Speaker Count", 
-                            value=False,
-                            info="Automatically determine optimal speaker count (uses Pyannote, requires HF token)."
+                            label="Auto-detect Speaker Count", value=False,
+                            interactive=True # Assume enabled unless preset disables diarization
                         )
                         
-                        enable_vocal_separation = gr.Checkbox(
-                            label="Enable Vocal Separation", 
-                            value=False,
-                            info="Isolate voices from background noise/music (required for Call Analysis mode)."
-                        )
+                    gr.Markdown("### Audio Handling")
                     with gr.Row():
+                        enable_vocal_separation = gr.Checkbox(
+                            label="Enable Vocal Separation (Demucs)", value=False,
+                            interactive=True # Assume enabled unless preset disables it
+                        )
                         split_stereo = gr.Checkbox(
-                            label="Split Stereo Channels (if stereo input)",
-                            value=False,
-                            info="Process Left and Right channels separately (useful for dual-mono recordings)"
+                            label="Split Stereo Channels (if stereo input)", value=False,
+                            info="Process L/R channels separately"
                         )
                         force_mono_output = gr.Checkbox(
-                            label="Force Mono Output Snippets",
-                            value=False,
+                            label="Force Mono Output Snippets", value=False,
                             info="Convert all output speaker/word audio files to mono."
                         )
+                        
+                    gr.Markdown("### Advanced Features")
                     with gr.Row():
                         enable_word_extraction = gr.Checkbox(
-                            label="Enable Word Audio Extraction", 
-                            value=False,
+                            label="Enable Word Audio Extraction", value=False,
                             info="Extract individual word audio snippets (generates many files)"
                         )
-                        
                         enable_second_pass = gr.Checkbox(
-                            label="Enable Second Pass Refinement", 
-                            value=False,
+                            label="Enable Second Pass Diarization Refinement", value=False,
                             info="Perform extra analysis to refine speaker separation (experimental)"
                         )
                     with gr.Row():
                         second_pass_min_duration = gr.Slider(
-                            label="Second Pass Min Duration (s)",
-                            minimum=0.5,
-                            maximum=30.0,
-                            step=0.5,
-                            value=5.0,
-                            info="Minimum segment length to consider for second pass refinement",
-                            interactive=True # Start enabled, update based on enable_second_pass
+                            label="Second Pass Min Duration (s)", minimum=0.5, maximum=30.0, step=0.5, value=5.0,
+                            info="Min segment length for second pass",
+                            interactive=False # Depends on enable_second_pass
                         )
                         
-                        # Sound detection checkbox - interactivity handled later
-                        attempt_sound_detection = gr.Checkbox(
-                            label="Attempt Sound Detection (CLAP)",
-                            value=False,
-                            info="Identify non-speech sounds (requires Vocal Separation)",
-                            interactive=False # Initially disabled
-                        )
-
-                # CLAP Options (Visibility depends on vocal sep & maybe mode later)
-                with gr.Group(visible=True) as clap_options_group: 
+            # <<< NEW DETECTION TAB >>>
+            with gr.TabItem("Detection"):
+                gr.Markdown("Configure settings for **Event Detection** and **Sound Detection (CLAP)**. These steps only run if the selected Preset includes them.")
+                
+                with gr.Group() as event_detection_group: # Group for event detection
+                    gr.Markdown("### Event Detection Settings")
+                    gr.HTML("<p style='font-size:small;color:grey'>Detects broader audio categories (e.g., speech, music, noise). Output: `events/events.json`.</p>")
+                    event_target_prompts_input = gr.Textbox(
+                        label="Target Events (comma-separated)",
+                        placeholder="e.g., speech, music, noise, telephone ringing",
+                        info="Prompts for event detection. Leave empty to use defaults.",
+                        lines=1,
+                        interactive=False # Depends on preset
+                    )
                     with gr.Row():
-                        attempt_sound_detection = gr.Checkbox(
-                            label="Enable Non-Vocal Sound Detection",
-                            value=False,
-                            info="Identify non-speech sounds in the non-vocal track (requires Vocal Separation)",
-                            interactive=False # Still depends on vocal sep
+                        event_threshold = gr.Slider(
+                            label="Event Detection Threshold", minimum=0.1, maximum=1.0, step=0.05, value=0.5, # Lower default maybe?
+                            info="Confidence threshold for detecting events.",
+                            interactive=False # Depends on preset
                         )
-                        enable_vocal_clap = gr.Checkbox(
-                            label="Enable Vocal Sound Detection",
-                            value=False,
-                            info="Identify vocal cues like laughter in the vocal track (requires Vocal Separation)",
-                            interactive=False # Also depends on vocal sep
+                        event_min_gap = gr.Slider(
+                             label="Event Min Gap (s)", minimum=0.1, maximum=10.0, step=0.1, value=1.0,
+                             info="Minimum time gap between detected events of the same type.",
+                             interactive=False # Depends on preset
                         )
+                        
+                with gr.Group() as sound_detection_group: # Group for sound detection
+                    gr.Markdown("### Sound Detection (CLAP) Settings")
+                    gr.HTML("<p style='font-size:small;color:grey'>Detects specific sounds using CLAP. Output: `sounds/sounds.json` (or similar). Often requires Vocal Separation.</p>")
+                    clap_target_prompts_input = gr.Textbox(
+                        label="Target Sounds (comma-separated)", 
+                        placeholder="e.g., telephone ringing, dial tone, laughter, dog barking", 
+                        info="Prompts for CLAP sound detection. Leave empty to use defaults.", 
+                        lines=1,
+                        interactive=False # Depends on preset
+                    )
                     with gr.Row():
-                        clap_chunk_duration = gr.Slider(
-                            label="CLAP Chunk Duration (s)",
-                            minimum=1.0,
-                            maximum=10.0, # Adjust max as needed
-                            step=0.5,
-                            value=5.0,
-                            info="Processing chunk size for CLAP sound detection",
-                            interactive=False # Depends on either CLAP option being enabled
-                        )
-                        clap_threshold = gr.Slider(
-                            label="CLAP Detection Threshold",
-                            minimum=0.1, 
-                            maximum=1.0,
-                            step=0.05,
-                            value=0.7,
+                        clap_threshold_input = gr.Slider(
+                            label="CLAP Detection Threshold", minimum=0.1, maximum=1.0, step=0.05, value=0.7,
                             info="Confidence threshold for CLAP (higher = stricter)",
-                            interactive=False # Depends on either CLAP option being enabled
+                            interactive=False # Depends on preset
                         )
-                    with gr.Row():
-                        clap_target_prompts = gr.Textbox(
-                            label="CLAP Target Prompts (Optional)",
-                            placeholder="e.g., telephone ringing, dial tone, music, laughter",
-                            info="Comma-separated list. If empty, uses defaults based on enabled detection types.",
-                            lines=1,
-                            interactive=False # Depends on either CLAP option being enabled
+                        clap_chunk_duration_input = gr.Slider(
+                            label="CLAP Chunk Duration (s)", minimum=1.0, maximum=10.0, step=0.5, value=5.0,
+                            info="Processing chunk size for CLAP",
+                            interactive=False # Depends on preset
                         )
 
-                hf_token = gr.Textbox(label="Hugging Face Token", type="password", info="Required for speaker diarization (Standard mode) or Pyannote models. Get token from huggingface.co/settings/tokens.")
-        
         with gr.Row():
             submit_button = gr.Button("Process Audio", variant="primary")
             stop_button = gr.Button("Stop Processing", variant="stop")
@@ -388,73 +453,98 @@ def build_interface():
             outputs=[output_message]
         )
 
-        submit_button.click(
-            fn=process_wrapper,
-            inputs=[
-                input_file, input_folder, url, output_folder, model, 
-                num_speakers, auto_speakers, enable_vocal_separation,
-                enable_word_extraction, enable_second_pass,
-                second_pass_min_duration,
-                attempt_sound_detection,
-                hf_token,
-                split_stereo,
-                clap_chunk_duration,
-                clap_threshold,
-                clap_target_prompts,
-                force_mono_output,
-                preset
-            ],
-            outputs=[output_message, result_file, transcript_preview]
-        )
-        
-        # Update interactivity functions
-        def update_sound_detection_interactivity(vocal_sep_enabled):
-            """Update both CLAP detection checkboxes based on vocal separation."""
-            if vocal_sep_enabled:
-                return [
-                    gr.update(interactive=True),  # For non-vocal detection
-                    gr.update(interactive=True)   # For vocal detection
-                ]
-            else:
-                return [
-                    gr.update(interactive=False, value=False),  # For non-vocal detection
-                    gr.update(interactive=False, value=False)   # For vocal detection
-                ]
+        # --- Interactivity Logic --- 
 
-        def update_clap_config_interactivity(non_vocal_enabled, vocal_enabled):
-            """Update CLAP configuration controls based on either detection being enabled."""
-            any_clap_enabled = non_vocal_enabled or vocal_enabled
-            return [
-                gr.update(interactive=any_clap_enabled),  # chunk duration
-                gr.update(interactive=any_clap_enabled),  # threshold
-                gr.update(interactive=any_clap_enabled,   # prompts
-                         value="" if not any_clap_enabled else None)  # Clear if disabled
-            ]
-
+        # Helper function (should be defined before use)
         def update_second_pass_slider_interactivity(second_pass_enabled):
             """Update second pass slider interactivity based on checkbox."""
             return gr.update(interactive=second_pass_enabled)
-
-        # Link vocal separation checkbox to both CLAP detection interactivity
-        enable_vocal_separation.change(
-            fn=update_sound_detection_interactivity,
-            inputs=enable_vocal_separation,
-            outputs=[attempt_sound_detection, enable_vocal_clap]
-        )
-
-        # Link both CLAP detection checkboxes to config interactivity
-        for clap_checkbox in [attempt_sound_detection, enable_vocal_clap]:
-            clap_checkbox.change(
-                fn=update_clap_config_interactivity,
-                inputs=[attempt_sound_detection, enable_vocal_clap],
-                outputs=[clap_chunk_duration, clap_threshold, clap_target_prompts]
-            )
 
         # Link second pass checkbox to slider interactivity
         enable_second_pass.change(
             fn=update_second_pass_slider_interactivity,
             inputs=enable_second_pass,
             outputs=second_pass_min_duration
+        )
+
+        # NEW: Link Preset dropdown to Detection tab controls
+        def update_detection_interactivity(preset_name):
+            try:
+                preset_data = get_preset_by_name(preset_name)
+                workflow = preset_data.get("config", {}).get("workflow", {})
+                
+                event_detect_enabled = workflow.get("detect_events", False)
+                sound_detect_enabled = workflow.get("detect_sounds", False)
+                
+                # Update Event Detection Group
+                event_updates = [
+                    gr.update(interactive=event_detect_enabled),
+                    gr.update(interactive=event_detect_enabled),
+                    gr.update(interactive=event_detect_enabled)
+                ]
+                
+                # Update Sound Detection Group
+                sound_updates = [
+                    gr.update(interactive=sound_detect_enabled),
+                    gr.update(interactive=sound_detect_enabled),
+                    gr.update(interactive=sound_detect_enabled)
+                ]
+                
+                # Combine updates for all controls in order
+                # Order: event_target_prompts, event_threshold, event_min_gap, 
+                #        clap_target_prompts, clap_threshold, clap_chunk_duration
+                return tuple(event_updates + sound_updates)
+
+            except Exception as e:
+                logger.error(f"Error updating detection interactivity for preset '{preset_name}': {e}")
+                # Return updates to disable everything on error
+                return tuple([gr.update(interactive=False)] * 6) 
+
+        preset.change(
+            fn=update_detection_interactivity,
+            inputs=preset,
+            outputs=[
+                # Event Detection Controls
+                event_target_prompts_input, 
+                event_threshold, 
+                event_min_gap,
+                # Sound Detection Controls
+                clap_target_prompts_input,
+                clap_threshold_input,
+                clap_chunk_duration_input
+            ]
+        )
+        
+        # --- Submit Button Call --- 
+        submit_button.click(
+            fn=process_wrapper,
+            inputs=[
+                # Input Tab
+                input_file, 
+                input_folder, 
+                url, 
+                output_folder, 
+                # Processing Options Tab
+                model, 
+                num_speakers, 
+                auto_speakers, 
+                enable_vocal_separation,
+                enable_word_extraction, 
+                enable_second_pass,
+                second_pass_min_duration,
+                hf_token,
+                split_stereo,
+                force_mono_output,
+                preset,
+                # Detection Tab
+                event_target_prompts_input,
+                event_threshold,
+                event_min_gap,
+                clap_target_prompts_input,
+                clap_threshold_input,
+                clap_chunk_duration_input
+            ],
+            outputs=[output_message, result_file, transcript_preview]
         )
 
         # Add sample URLs only since file examples cause issues

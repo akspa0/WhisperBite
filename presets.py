@@ -58,8 +58,11 @@ def get_standard_preset(**kwargs) -> Dict[str, Any]:
                 "target_prompts": kwargs.get("clap_target_prompts", TARGET_SOUND_PROMPTS),
                 "chunk_duration_s": kwargs.get("clap_chunk_duration", DEFAULT_CALL_CHUNK_DURATION)
             },
-            # Add other sections with defaults for completeness if needed by process_audio
-            "event_detection": {},
+            "event_detection": {
+                "threshold": kwargs.get("event_threshold", 0.5),
+                "min_duration": kwargs.get("event_min_gap", 1.0),
+                "target_events": kwargs.get("event_target_prompts", DEFAULT_EVENTS)
+            },
             "vocal_separation": {},
             "segment_cutting": {}
         }
@@ -92,9 +95,16 @@ def get_transcription_preset(**kwargs) -> Dict[str, Any]:
                 "word_timestamps": True,
                 "vad_filter": True
             },
-            # Add other sections with defaults
-            "event_detection": {},
-            "sound_detection": {},
+            "event_detection": {
+                "threshold": kwargs.get("event_threshold", 0.5),
+                "min_duration": kwargs.get("event_min_gap", 1.0),
+                "target_events": kwargs.get("event_target_prompts", DEFAULT_EVENTS)
+            },
+            "sound_detection": {
+                "threshold": kwargs.get("clap_threshold", DEFAULT_CALL_THRESHOLD),
+                "target_prompts": kwargs.get("clap_target_prompts", TARGET_SOUND_PROMPTS),
+                "chunk_duration_s": kwargs.get("clap_chunk_duration", DEFAULT_CALL_CHUNK_DURATION)
+            },
             "segment_cutting": {}
         }
     }
@@ -121,8 +131,8 @@ def get_event_guided_preset(**kwargs) -> Dict[str, Any]:
             # Step-specific configurations remain here
             "event_detection": {
                 "threshold": kwargs.get("event_threshold", 0.5),
-                "min_duration": kwargs.get("min_duration", 1.0),
-                "target_events": kwargs.get("target_events", ["speech", "music", "noise"])
+                "min_duration": kwargs.get("event_min_gap", 1.0),
+                "target_events": kwargs.get("event_target_prompts", DEFAULT_EVENTS)
             },
             "vocal_separation": {
                 "model": kwargs.get("separation_model", "htdemucs"),
@@ -147,7 +157,7 @@ def get_event_guided_preset(**kwargs) -> Dict[str, Any]:
         }
     }
 
-def get_transcribe_only_preset() -> Dict[str, Any]:
+def get_transcribe_only_preset(**kwargs) -> Dict[str, Any]:
     """Transcription-only workflow preset."""
     workflow_config = _get_default_workflow_config()
     workflow_config["transcribe"] = True
@@ -158,11 +168,18 @@ def get_transcribe_only_preset() -> Dict[str, Any]:
         # Workflow config moved inside "config"
         "config": {
             "workflow": workflow_config,
-            # Add empty sections for consistency
-            "transcription": {}, # Assuming process_audio uses defaults if transcribe=True but no config given
-            "event_detection": {},
+            "transcription": {},
+            "event_detection": {
+                "threshold": kwargs.get("event_threshold", 0.5),
+                "min_duration": kwargs.get("event_min_gap", 1.0),
+                "target_events": kwargs.get("event_target_prompts", DEFAULT_EVENTS)
+            },
+            "sound_detection": {
+                "threshold": kwargs.get("clap_threshold", DEFAULT_CALL_THRESHOLD),
+                "target_prompts": kwargs.get("clap_target_prompts", TARGET_SOUND_PROMPTS),
+                "chunk_duration_s": kwargs.get("clap_chunk_duration", DEFAULT_CALL_CHUNK_DURATION)
+            },
             "vocal_separation": {},
-            "sound_detection": {},
             "segment_cutting": {}
         }
     }

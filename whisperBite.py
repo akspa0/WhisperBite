@@ -10,6 +10,7 @@ import re
 import yaml
 from typing import Dict, List, Tuple, Optional, Any
 import threading
+import time
 
 # Third-party imports
 import torch
@@ -770,14 +771,59 @@ def process_audio(
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Extract and normalize audio
-    audio_path = get_audio_from_input(input_file, output_dir)
+    # Extract and normalize audio (Normalization might already set 48kHz, but let's ensure)
+    normalized_audio_path = normalize_audio(input_file, output_dir) # Assume normalize creates a file in output_dir/normalized/
+    logging.info(f"Normalized audio path: {normalized_audio_path}")
+    
+    # --- Ensure Audio is 48kHz using FFmpeg --- 
+    audio_path_for_processing = normalized_audio_path # Start with normalized path
+    try:
+        import soundfile as sf
+        info = sf.info(normalized_audio_path)
+        current_sr = info.samplerate
+        logging.info(f"Current sample rate after normalization: {current_sr}Hz")
+        
+        if current_sr != 48000:
+            logging.warning(f"Sample rate is {current_sr}Hz, resampling to 48000Hz using ffmpeg.")
+            resampled_path = os.path.join(os.path.dirname(normalized_audio_path), 
+                                        f"{os.path.splitext(os.path.basename(normalized_audio_path))[0]}_48khz.wav")
+            
+            cmd = [
+                "ffmpeg", "-y", "-i", normalized_audio_path,
+                "-ar", "48000",
+                resampled_path
+            ]
+            
+            t_start_ffmpeg = time.time()
+            process = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            t_end_ffmpeg = time.time()
+            
+            if process.returncode == 0:
+                logging.info(f"FFmpeg resampling successful in {t_end_ffmpeg - t_start_ffmpeg:.2f}s. Output: {resampled_path}")
+                audio_path_for_processing = resampled_path # Use the resampled path
+            else:
+                logging.error(f"FFmpeg resampling failed! Return Code: {process.returncode}")
+                logging.error(f"FFmpeg stderr: {process.stderr}")
+                # Decide how to proceed - maybe raise error or use original?
+                # For now, log error and continue with potentially wrong sample rate path
+                logging.error("Proceeding with non-resampled audio. Detection might fail.")
+                # audio_path_for_processing remains normalized_audio_path
+        else:
+            logging.info("Audio is already 48kHz. No ffmpeg resampling needed.")
+            
+    except Exception as e:
+        logging.error(f"Error checking/resampling audio sample rate: {e}", exc_info=True)
+        logging.error("Proceeding with potentially incorrect sample rate audio.")
+        # audio_path_for_processing remains normalized_audio_path
+    # --- End 48kHz Check --- 
+    
+    logging.info(f"Final audio path for detection/processing: {audio_path_for_processing}")
     
     results = {
         "input_file": input_file,
         "output_dir": output_dir,
         "preset": preset_name,
-        "audio_path": audio_path,
+        "audio_path": audio_path_for_processing, # Use the final path
         "processing_time": datetime.datetime.now().isoformat(),
         "device": device
     }
@@ -798,14 +844,20 @@ def process_audio(
             logging.warning("No target events specified in config, using default events.")
             target_events = DEFAULT_EVENTS # Use imported defaults
             
-        logging.info(f"Using target events: {target_events}") # Log which events are used
+        # <<< Add Logging Here >>>
+        logging.info(f"--- Calling detect_and_save_events ---")
+        logging.info(f"  Audio Path: {audio_path_for_processing}") # Log path used
+        logging.info(f"  Target Events: {target_events}")
+        logging.info(f"  Threshold: {threshold}")
+        logging.info(f"  Min Gap: {min_gap}")
+        # <<< End Logging >>>
 
         event_results = detect_and_save_events(
-            audio_path=audio_path,
-            output_dir=output_dir,
-            target_events=target_events, # Pass the final (possibly defaulted) list
+            audio_path=audio_path_for_processing, # <<< Use potentially resampled path
+            output_dir=os.path.join(output_dir, "events"), # Save in events subfolder
+            target_events=target_events, 
             threshold=threshold,
-            min_gap=min_gap # Pass the correctly retrieved min_gap
+            min_gap=min_gap 
         )
 
         results["events"] = event_results
@@ -817,27 +869,29 @@ def process_audio(
     if workflow.get("separate_vocals"):
         logging.info("Separating vocals from audio...")
         
-        # First separate vocals using demucs
+        # --- Run Demucs on the 48kHz audio --- 
+        demucs_output_dir = os.path.join(output_dir, "demucs")
         vocals_path, nonvocals_path = separate_vocals_with_demucs(
-            input_audio=audio_path,
-            output_dir=output_dir
+            input_audio=audio_path_for_processing, # <<< Use potentially resampled path
+            output_dir=demucs_output_dir # Save in demucs subfolder
         )
+        # Log the demucs output paths
+        logging.info(f"Demucs vocals path: {vocals_path}")
+        logging.info(f"Demucs non-vocals path: {nonvocals_path}")
         
-        if vocals_path and nonvocals_path:
-            # Create audio segments
-            vocals = AudioSegment.from_file(vocals_path)
-            nonvocals = AudioSegment.from_file(nonvocals_path)
-            
-            # Export segments
-            base_name = os.path.splitext(os.path.basename(audio_path))[0]
-            vocal_path, nonvocal_path = export_audio_segments(
-                audio_segments=[vocals, nonvocals],
-                output_dir=output_dir,
-                base_name=base_name
-            )
-            
-            results["vocal_path"] = vocal_path
-            results["nonvocal_path"] = nonvocal_path
+        # --- Update results with relative paths if possible --- 
+        # Assuming demucs function returns absolute paths
+        if vocals_path:
+            results["vocal_path"] = os.path.relpath(vocals_path, output_dir)
+        if nonvocals_path:
+            results["nonvocal_path"] = os.path.relpath(nonvocals_path, output_dir)
+        # Note: The original absolute paths are still needed for processing below
+        # Storing relative paths in the final results dict is for user output/YAML.
+        # We need to keep track of vocals_path_abs and nonvocals_path_abs for actual use.
+        vocals_path_abs = vocals_path
+        nonvocals_path_abs = nonvocals_path
+        
+        # Original code for loading AudioSegments removed as it's not used before transcription
         
         if stop_event and stop_event.is_set():
             return {"status": "cancelled", **results}
@@ -882,7 +936,7 @@ def process_audio(
                                 # Load audio segment safely
                                 try:
                                     # Add a small buffer in case times are exact boundaries
-                                    audio_segment = AudioSegment.from_file(audio_path)[
+                                    audio_segment = AudioSegment.from_file(audio_path_for_processing)[
                                         int(segment_start * 1000 - 10):int(segment_end * 1000 + 10)
                                     ]
                                 except Exception as load_err:
@@ -926,7 +980,7 @@ def process_audio(
             else:
                  logging.warning("Event-guided transcription enabled, but no valid speech/conversation events found or transcribed. Falling back to full transcription.")
                  # Fallback to full transcription if no segments were generated
-                 result = model.transcribe(audio_path)
+                 result = model.transcribe(audio_path_for_processing)
                  results["transcription"] = result
 
         else:
@@ -934,7 +988,7 @@ def process_audio(
             # Check if transcription already exists from fallback
             if "transcription" not in results:
                 logging.info("Performing full transcription.")
-                result = model.transcribe(audio_path)
+                result = model.transcribe(audio_path_for_processing)
                 results["transcription"] = result
             else:
                  logging.info("Skipping full transcription as event-guided fallback already ran.")
@@ -946,14 +1000,18 @@ def process_audio(
     if workflow.get("detect_sounds"):
         logging.info("Detecting sounds in audio...")
 
-        # Determine audio path (use original or separated vocals)
-        sound_detection_audio_path = audio_path
-        if workflow.get("separate_vocals") and results.get("vocal_path"):
-            # Optional: Could add logic to detect on non-vocals if desired
-            sound_detection_audio_path = results["vocal_path"] 
-            logging.info(f"Running sound detection on separated vocal track: {sound_detection_audio_path}")
+        # Determine audio path (use non-vocals if available and separation ran)
+        sound_detection_audio_path = audio_path_for_processing # Default to main 48k path
+        if workflow.get("separate_vocals") and nonvocals_path_abs and os.path.exists(nonvocals_path_abs):
+            sound_detection_audio_path = nonvocals_path_abs # Use absolute path to non-vocals
+            logging.info(f"Running sound detection on separated non-vocal track: {sound_detection_audio_path}")
+        elif workflow.get("separate_vocals"):
+             logging.warning("Vocal separation enabled, but non-vocal track path not found. Running sound detection on main audio.")
         else:
-            logging.info(f"Running sound detection on original audio track: {sound_detection_audio_path}")
+            logging.info(f"Running sound detection on main audio track: {sound_detection_audio_path}")
+        
+        # Log final path choice
+        logging.info(f"Final audio path for detect_sound_events: {sound_detection_audio_path}")
 
         # Get config for sound detection
         sound_config = preset_config.get("sound_detection", {})
@@ -966,7 +1024,13 @@ def process_audio(
             logging.warning("No target prompts specified for sound detection, using defaults.")
             target_prompts = TARGET_SOUND_PROMPTS # Use imported default
 
-        logging.info(f"Using sound detection prompts: {target_prompts}")
+        # <<< Add Logging Here >>>
+        logging.info(f"--- Calling detect_sound_events ---")
+        logging.info(f"  Audio Path: {sound_detection_audio_path}") # Log path used
+        logging.info(f"  Target Prompts: {target_prompts}")
+        logging.info(f"  Threshold: {threshold}")
+        logging.info(f"  Chunk Duration (s): {chunk_duration_s}")
+        # <<< End Logging >>>
 
         detected_sounds = detect_sound_events(
             audio_path=sound_detection_audio_path,
@@ -975,25 +1039,57 @@ def process_audio(
             target_prompts=target_prompts # Pass the final list
         )
 
-        results["detected_sounds"] = detected_sounds
-        
-        # Cut audio at detected sounds
-        if detected_sounds:
+        # Save results (e.g., to sounds/sounds.json)
+        sounds_output_dir = os.path.join(output_dir, "sounds")
+        os.makedirs(sounds_output_dir, exist_ok=True)
+        sounds_output_path = os.path.join(sounds_output_dir, "sounds.json")
+        try:
+            import json
+            with open(sounds_output_path, 'w') as f:
+                json.dump(detected_sounds, f, indent=2)
+            logging.info(f"Saved sound detection results to {sounds_output_path}")
+            results["detected_sounds_path"] = os.path.relpath(sounds_output_path, output_dir)
+        except Exception as e:
+             logging.error(f"Failed to save sound detection results: {e}")
+             
+        results["detected_sounds"] = detected_sounds # Keep raw results for potential immediate use
+            
+        # --- Cutting based on SOUNDS --- 
+        # Decide if cutting should happen based on sounds or events
+        # Original workflow cut based on sounds if detect_sounds was true
+        if workflow.get("cut_segments"): # Assuming cut_segments means cut based on whatever detection ran
+            logging.info("Cutting audio based on detected sounds...")
+            cut_segments_output_dir = os.path.join(output_dir, "cut_segments") # Save in cut_segments subfolder
             cut_segments = cut_audio_at_detections(
-                audio_path=audio_path,
-                detected_events=detected_sounds,
-                output_dir=output_dir
+                audio_path=audio_path_for_processing, # Cut the main 48k audio
+                detected_events=detected_sounds, # <<< Use detected_sounds for cutting
+                output_dir=cut_segments_output_dir 
             )
             
-            results["cut_segments"] = cut_segments
+            # Update results with relative paths
+            if cut_segments:
+                 results["cut_segments"] = [
+                     {**seg, 'path': os.path.relpath(seg['path'], output_dir)} 
+                     for seg in cut_segments if seg.get('path')
+                 ]
+            else:
+                 results["cut_segments"] = []
             
         if stop_event and stop_event.is_set():
             return {"status": "cancelled", **results}
     
-    # Save results
-    results_path = os.path.join(output_dir, "results.yaml")
-    with open(results_path, "w") as f:
-        yaml.dump(results, f)
+    # --- Update Master Transcript / Save Final Results --- 
+    # This part needs significant refactoring based on the desired final output structure
+    # Needs to combine transcription results (which also need path fixes) with events/sounds
+    logging.info("Saving final results...")
+    results_path = os.path.join(output_dir, "results.yaml") # Save in root of run folder
+    try:
+        with open(results_path, "w") as f:
+            # Dump the results dictionary (potentially clean up absolute paths first)
+            yaml.dump(results, f, default_flow_style=False, sort_keys=False)
+        logging.info(f"Saved final results YAML to {results_path}")
+    except Exception as e:
+        logging.error(f"Failed to save final results YAML: {e}")
         
     results["status"] = "completed"
     return results

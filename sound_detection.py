@@ -576,55 +576,65 @@ def detect_sound_events(
         logging.error("CLAP model is not available. Skipping sound detection.")
         return []
 
-    logging.info(f"Starting CLAP sound event detection for: {audio_path}")
+    logging.info(f"Starting sound detection for: {audio_path}")
     logging.info(f"Parameters: Chunk Duration={chunk_duration_s}s, Threshold={threshold}")
     
     detected_events = []
     prompts_to_use = target_prompts if target_prompts else TARGET_SOUND_PROMPTS
     logging.info(f"Using target prompts: {prompts_to_use}")
 
+    global device # Access the device determined by load_clap_model
+
     try:
-        # Load audio using librosa, ensuring correct sample rate
-        # Load as mono for simplicity, as CLAP typically processes single channel audio embeddings effectively.
-        logging.info(f"Loading audio: {audio_path}...")
-        waveform, sr = librosa.load(audio_path, sr=CLAP_SAMPLE_RATE, mono=True)
-        logging.info(f"Loaded audio with shape {waveform.shape} at {sr}Hz ({librosa.get_duration(y=waveform, sr=sr):.2f} seconds).")
+        # Load audio using librosa, assuming it's already 48kHz
+        logging.info(f"Loading audio with librosa (expecting 48kHz): {audio_path}")
+        t_load_start = time.time()
+        audio_data, sr = librosa.load(audio_path, sr=None, mono=True) # Load native rate
+        logging.info(f"Successfully loaded {audio_path} via librosa in {time.time() - t_load_start:.2f}s, sample rate {sr}")
         
-        if waveform.size == 0:
-             logging.warning(f"Audio file {audio_path} is empty or could not be loaded correctly.")
-             return []
+        # --- Add Assertion --- 
+        assert sr == CLAP_SAMPLE_RATE, \
+            f"[SoundDetector] Expected sample rate {CLAP_SAMPLE_RATE} but received {sr}. Resample upstream."
+        # --- End Assertion ---
+        
+        duration = len(audio_data) / sr
+        logging.info(f"Audio duration: {duration:.1f}s")
 
-        num_samples = len(waveform)
+        if audio_data.size == 0:
+            logging.error("Loaded audio data is empty.")
+            return []
+
+        # Process audio in chunks
         chunk_size = int(chunk_duration_s * CLAP_SAMPLE_RATE)
-        num_chunks = int(np.ceil(num_samples / chunk_size))
+        num_chunks = int(np.ceil(len(audio_data) / chunk_size))
+
+        logging.info(f"Processing {num_chunks} chunks...")
         
-        logging.info(f"Processing audio in {num_chunks} chunks of ~{chunk_duration_s}s...")
-
-        sound_event_counter = 0 # For unique sequence if needed later
-
-        for i in range(num_chunks):
-            start_sample = i * chunk_size
-            end_sample = min((i + 1) * chunk_size, num_samples)
-            chunk_waveform = waveform[start_sample:end_sample]
+        for i in tqdm(range(num_chunks), desc="Detecting sounds"):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, len(audio_data))
+            chunk = audio_data[start_idx:end_idx]
             
-            # Calculate timestamps for this chunk
-            start_time = start_sample / CLAP_SAMPLE_RATE
-            end_time = end_sample / CLAP_SAMPLE_RATE
-            
-            if len(chunk_waveform) == 0:
+            # Check for very short chunks (can happen at the end)
+            if len(chunk) < CLAP_SAMPLE_RATE * 0.1: # Skip if less than 100ms
                 continue
-
+                
+            # Process the chunk
             try:
-                 # Process with CLAP
+                # Process with CLAP
                 inputs = clap_processor(
                     text=prompts_to_use, 
-                    audios=[chunk_waveform], # Processor expects a list of audio arrays
+                    audios=[chunk], # Processor expects a list of audio arrays
                     return_tensors="pt", 
                     padding=True, 
                     sampling_rate=CLAP_SAMPLE_RATE
                 ).to(device)
 
                 with torch.no_grad():
+                    # <<< Log Devices >>>
+                    logging.debug(f"[SOUNDPROC] Model device: {next(clap_model.parameters()).device}")
+                    logging.debug(f"[SOUNDPROC] Input device: {inputs['input_ids'].device}") # Key might be input_ids or similar
+                    # <<< End Log >>>
                     outputs = clap_model(**inputs)
                 
                 # logits_per_audio: [batch_size, num_prompts] 
@@ -645,24 +655,23 @@ def detect_sound_events(
                     try:
                         confidence = float(probs[prompt_idx] if prompt_idx < len(probs) else probs)
                         if confidence >= threshold:
-                            logging.debug(f"Detected '{prompt_text}' (Conf: {confidence:.3f}) at {start_time:.2f}s - {end_time:.2f}s")
+                            logging.debug(f"Detected '{prompt_text}' (Conf: {confidence:.3f}) at {start_idx/CLAP_SAMPLE_RATE:.2f}s - {end_idx/CLAP_SAMPLE_RATE:.2f}s")
                             detected_events.append({
                                 'speaker': 'SOUND', # Keep consistent label for sound events
-                                'start': start_time,
-                                'end': end_time,
+                                'start': start_idx/CLAP_SAMPLE_RATE,
+                                'end': end_idx/CLAP_SAMPLE_RATE,
                                 'text': f"{prompt_text}", # Just the label, confidence is separate now
                                 'confidence': confidence, # Store confidence
                                 'audio_file': None, # Keep structure consistent if needed elsewhere
                                 'transcript_file': None,
-                                'sequence': sound_event_counter # Maintain sequence if helpful
+                                'sequence': i # Maintain sequence if helpful
                             })
-                            sound_event_counter += 1
                     except (IndexError, TypeError) as e:
                         logging.warning(f"Error processing probability for prompt '{prompt_text}': {e}")
                         continue
             
             except Exception as chunk_e:
-                logging.error(f"Error processing chunk {i} ({start_time:.2f}s-{end_time:.2f}s): {chunk_e}", exc_info=True)
+                logging.error(f"Error processing chunk {i} ({start_idx/CLAP_SAMPLE_RATE:.2f}s-{end_idx/CLAP_SAMPLE_RATE:.2f}s): {chunk_e}", exc_info=True)
                 continue # Skip to next chunk on error
 
     except Exception as e:

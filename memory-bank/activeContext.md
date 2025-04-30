@@ -2,6 +2,64 @@
 
 ## Current Focus
 
+**Refactoring CLAP Event Detection:** The CLAP Event Detection step (`EventDetector` class in `event_detection.py`) consistently hangs at the start of processing the first audio chunk. This occurs despite correct dependency installation (PyTorch w/ CUDA), successful model loading onto the GPU, and successful text feature precomputation. CPU usage maxes out while the GPU remains idle, indicating a deadlock or fundamental issue with the current implementation's handling of the first CUDA operation on audio data. Previous debugging attempts (forcing CPU, disabling autocast, adding granular logging) did not resolve the hang.
+
+## Recent Changes
+
+*   **Dependencies:** Installed latest PyTorch (2.7.0) with CUDA support in a clean conda environment. Installed all other requirements (including fixing missing `psutil`).
+*   **Debugging Attempts (Event Detection):**
+    *   Verified CUDA detection and model loading logs.
+    *   Forced CPU temporarily (still hung, confirming issue wasn't solely CUDA execution).
+    *   Disabled/Re-enabled `torch.amp.autocast`.
+    *   Added granular `[CHUNKPROC]` logging and timing within `process_audio_chunk`. -> Confirmed hang occurs before/during the first call to this function or immediately upon entering it.
+*   **(Previous)** UI Refactoring (Detection Tab), Output Structure Restoration, Config Flow Rework, File Logging, Various Fixes.
+
+## Active Decisions
+
+*   **Abandon `EventDetector` Fixes:** Stop trying to patch the existing `EventDetector` class implementation due to the persistent, unexplained hang.
+*   **Adopt Refactoring Plan:** Proceed with the plan below to rebuild the event detection logic.
+
+## Refactoring Plan: CLAP Event Detection
+
+1.  **Centralize CLAP Model Loading:**
+    *   Modify `whisperBite.py::process_audio` to load the CLAP model (`ClapModel`) and processor (`ClapProcessor`) *once* at the beginning if the `"detect_events"` step is enabled in the preset's workflow.
+    *   This central loading point will manage the device selection (`cuda`/`cpu`) and keep the loaded model/processor objects available.
+
+2.  **Simplify Event Detection Logic:**
+    *   Remove the `EventDetector` class from `event_detection.py`.
+    *   Create a new, straightforward function within `event_detection.py`, named `run_clap_event_detection(audio_data, sample_rate, clap_model, clap_processor, device, target_events, threshold, chunk_duration, min_gap)`.
+    *   This function will take the pre-loaded model, processor, audio data (as a NumPy array), device, and configuration parameters as input.
+    *   It will contain the core logic:
+        *   Precompute text features using the passed processor/model/device.
+        *   Iterate through audio chunks.
+        *   Prepare inputs using the processor.
+        *   Run inference (`clap_model.get_audio_features`) within `torch.no_grad()` and `torch.amp.autocast` contexts.
+        *   Calculate similarity.
+        *   Collect detections.
+        *   Apply Temporal NMS (using the existing static method, perhaps moved outside the old class).
+
+3.  **Update `whisperBite.py::process_audio`:**
+    *   Import the new `run_clap_event_detection` function.
+    *   Add the CLAP model/processor loading logic mentioned in step 1.
+    *   Read event detection parameters (`target_events`, `threshold`, etc.) from the `preset_config["event_detection"]` dictionary. Provide sensible defaults if keys are missing.
+    *   Load the audio file into a NumPy array using `soundfile.read` (or similar) *before* calling the detection function.
+    *   If event detection is enabled, call `run_clap_event_detection`, passing all required arguments.
+    *   Handle saving the returned event dictionary to `events/events.json`.
+
+4.  **Refine Logging:**
+    *   Keep INFO level logs for model loading, text precomputation, audio loading, and saving results.
+    *   Change the detailed intra-chunk logs (`[CHUNKPROC]`) to DEBUG level for optional deep debugging.
+
+## Next Steps
+
+1.  **Implement Refactoring Plan:** Execute the steps outlined above to refactor CLAP event detection.
+2.  **Test Refactored Implementation:** Run with the "Event-Guided" preset and verify that event detection proceeds correctly on the GPU without hanging.
+3.  **Continue Workflow:** Once event detection is functional, proceed with testing subsequent steps (event-guided transcription, etc.).
+
+## Current Focus
+
+**Debugging Performance Bottleneck:** Investigating extreme slowness (potential stall) during the CLAP Event Detection phase. The process shows 100% CPU usage and 0% GPU usage during the `Detecting events` progress loop, despite logs indicating `cuda` as the target device.
+
 1.  **UI Refactoring & Clarity:**
     *   Create a dedicated "Detection" tab in the Gradio UI.
     *   Implement separate input controls within the "Detection" tab for *Event Detection* (prompts, threshold, min gap) and *Sound Detection (CLAP)* (prompts, threshold, chunk duration).
@@ -17,60 +75,31 @@
 
 ## Recent Changes
 
-*   **Fixed `stop_event` Handling:** Resolved `AttributeError` by passing a `threading.Event` from `app.py` to `whisperBite.py` instead of a lambda function. Modified `stop_current_job` to set the event.
-*   **Fixed `KeyError: 'workflow'`:** Refactored `presets.py` to move the `workflow` configuration (as a dict of booleans) inside the `config` dictionary, matching the structure expected by `process_audio`.
-*   **Fixed `KeyError: 'name'`:** Modified `process_audio` to accept `preset_name` as a direct argument and updated the call site in `app.py`.
-*   **Fixed CLAP Prompt Issues (Initial):** Corrected logic in `whisperBite.py` (`process_audio`) for *event detection* to handle potentially empty prompt lists from config and use `DEFAULT_EVENTS`. Corrected key usage (`min_duration` vs `min_gap`).
-*   **Fixed `TypeError` in Event-Guided Transcription:** Corrected the loop in `whisperBite.py` to iterate over the list of detection dictionaries within `results["events"]` and use `event["type"]` instead of `event["label"]`. Added fallback and error handling.
-*   **Partially Fixed CLAP Prompts:** Updated `presets.py` to use correct kwargs (`clap_target_prompts`, etc.) for *sound detection* config. Updated `whisperBite.py` to use correct keys/defaults for sound detection. *(Self-correction: Realized this didn't fix prompts for EVENT detection, leading to current plan).*
+*   **UI Refactoring:** Created dedicated "Detection" tab with separate controls for Event and Sound detection, linked interactivity to selected Preset.
+*   **Output Structure Restoration:** Implemented unique, timestamped output directory creation per run (`<output_folder>/<input_name>_<timestamp>/`).
+*   **Configuration Flow Rework:** Aligned UI (`app.py`), presets (`presets.py`), and backend (`whisperBite.py`) to handle distinct settings for Event Detection and Sound Detection. Filtered empty strings from prompt inputs.
+*   **File Logging:** Implemented per-run logging to `processing.log` within the unique output directory.
+*   **Debugging Added:**
+    *   Added logging to show parameters passed to detection functions (`detect_and_save_events`, `detect_sound_events`).
+    *   Added logging inside NMS (`apply_temporal_nms`).
+    *   Added logging to check PyTorch device for model/tensors before CLAP inference.
+    *   Added timing logs around audio loading/resampling (`sf.read`, `librosa.load`, `librosa.resample`).
+*   **Previous Fixes:** `stop_event` AttributeError, `KeyError: 'workflow'`, `KeyError: 'name'`, `TypeError` in event-guided transcription, initial prompt logic fixes.
 
 ## Active Decisions
 
-*   Event Detection and Sound Detection (CLAP) require separate configuration controls in the UI for clarity.
-*   The processing pipeline *must* generate a unique, timestamped output directory per run, containing standardized subdirectories for each processing stage's outputs.
-*   UI control interactivity should be driven by the selected Preset to guide the user.
+*   Focus on resolving the CPU/GPU performance bottleneck before further feature work or workflow refactoring.
+*   Event/Sound detection have separate UI controls and configuration paths.
+*   Output is organized into unique, timestamped run directories with subfolders.
 
 ## Next Steps
 
-1.  **Implement UI Refactoring (`app.py`):** Create "Detection" tab, move/add controls, remove old ones, update interactivity based on presets.
-2.  **Implement Output Directory Structure (`app.py`):** Modify `process_wrapper` to create the timestamped root directory and pass its path to `run_pipeline`. Modify `run_pipeline`/`process_audio` (or helpers) to use this path and create necessary subdirectories.
-3.  **Update Backend (`app.py`, `presets.py`, `whisperBite.py`):** Adapt `process_wrapper` to handle new UI inputs, modify `presets.py` to use new distinct kwargs, verify `whisperBite.py` uses correct keys from config.
-4.  **Testing:** Thoroughly test different presets, custom prompts for both detection types, and verify the output directory structure and file contents.
-
-**Current Work Focus:** **Implementing planned CLAP enhancements (configurable prompts, event logging) and UI clarity updates before testing.**
-
-**Recent Changes:**
-*   **Refactored Sound Detection to use CLAP:**
-    *   Replaced YAMNet/TensorFlow with `transformers.ClapModel`.
-    *   Added basic CLI/UI config for enable/chunk/threshold.
-    *   Integrated into `process_audio` and YAML output.
-*   **Updated Dependencies:** Removed TF, added `transformers`.
-*   Refactored Demucs integration (paths, flags, chunking).
-*   Refactored Master Transcript Generation (YAML output, merging logic for mono second pass).
-*   Implemented Speaker Label Formatting (`S0`, `S1`, `S0_L`, `S0_R`).
-*   Added Stereo Splitting (`--split_stereo`).
-*   Added Media Info extraction.
-*   Added Second Pass configuration (min duration).
-*   Added detailed logging for transcript merging debugging.
-*   Set auto speaker detection default to `False`.
-
-**Next Steps / Planned Enhancements:**
-*   **CLAP - Configurable Target Prompts:** 
-    *   Add UI Textbox (`app.py`) and CLI arg (`--clap_target_prompts` in `whisperBite.py`) for comma-separated prompts.
-    *   Update `process_audio` to parse and pass prompts to `detect_sound_events`.
-    *   Add used prompts to YAML metadata.
-*   **CLAP - Log Detected Events:** 
-    *   Modify `process_audio` to loop through `sound_event_segments` and log each detected event (label, time, confidence) to `processing.log`.
-*   **UI Clarity - Pyannote/HF Token:**
-    *   Add info text to speaker count slider/checkbox in `app.py` explaining Pyannote dependency and HF token requirement for diarization.
-*   **Testing (After Enhancements):**
-    *   CLAP Accuracy/Performance (with default and custom prompts).
-    *   Stereo Split Functionality & interactions.
-    *   YAML Output Structure & relative paths.
-    *   Second Pass Merging (Mono) - check logs for duplication.
-    *   Demucs Chunking stability/quality.
-*   **Known Issues / Future Refinements:**
-    *   Second-pass refinement **not implemented** for `split_stereo` path.
-    *   Auto speaker detection **not implemented per-channel** for `split_stereo` path.
-    *   *(Low Priority)* **DAC Encoding:** Consider adding option to encode output audio snippets using DAC model (`transformers.DacModel`) for high-efficiency storage.
-*   Package application (Pinokio). 
+1.  **System Reboot (User Action):** User to restart WSL (`wsl --shutdown`) and/or the entire machine to rule out transient system/driver issues affecting GPU utilization.
+2.  **Re-run & Check Logs:** After reboot, run again (e.g., "Event-Guided" preset, 0.5 threshold, empty prompts).
+3.  **Analyze `processing.log`:**
+    *   Verify device logs (`[CHUNKPROC] Model device:`, `[SOUNDPROC] Model device:`, etc.) confirm `cuda` during inference steps.
+    *   Note the time taken for loading/resampling steps.
+    *   Observe if the `Detecting events` progress bar moves and if GPU utilization increases during this phase.
+4.  **If Stall Persists:** Further investigation is needed, potentially focusing on:
+    *   PyTorch/CUDA environment validation (versions, compatibility).
+    *   Adding more granular logging *within* the CLAP model inference calls (`
