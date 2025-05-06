@@ -14,6 +14,7 @@ import psutil
 import math
 import threading
 import re
+import torchaudio
 
 # <<< Moved logger definition here >>>
 logger = logging.getLogger(__name__)
@@ -931,6 +932,82 @@ def extract_soundbites(segment_audio_path: str, segment_annotations: Dict[str, L
 
     logger.info(f"Extracted {len(soundbite_paths)} soundbites for {os.path.basename(segment_audio_path)}.")
     return soundbite_paths
+
+def detect_speech_regions_vad(audio_path: str, sampling_rate: int = 16000, threshold: float = 0.5) -> list[tuple[float, float]]:
+    """
+    Detects speech regions in an audio file using Silero VAD.
+    Returns a list of (start, end) tuples in seconds for each detected speech region.
+    """
+    # Load Silero VAD model
+    model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', trust_repo=True)
+    (get_speech_timestamps, _, read_audio, _, _) = utils
+
+    # Read audio
+    wav = read_audio(audio_path, sampling_rate=sampling_rate)
+    # Run VAD
+    speech_timestamps = get_speech_timestamps(wav, model, threshold=threshold)
+
+    # Convert to (start, end) in seconds
+    speech_regions = []
+    for ts in speech_timestamps:
+        start_sec = ts['start'] / sampling_rate
+        end_sec = ts['end'] / sampling_rate
+        speech_regions.append((start_sec, end_sec))
+    return speech_regions
+
+def extract_vad_aligned_soundbites(
+    audio_path: str,
+    whisper_segments: list[dict],
+    vad_regions: list[tuple[float, float]],
+    output_dir: str,
+    format: str = "wav",
+    max_filename_len: int = 128,
+    min_duration_s: float = 0.2,
+    padding_ms: int = 150
+) -> list[dict]:
+    """
+    Extracts soundbites for each VAD region by merging Whisper text for overlapping segments.
+    Saves each soundbite as a WAV file with a numerical prefix and sanitized transcript.
+    Returns a list of metadata dicts for each soundbite.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    soundbites = []
+    audio = AudioSegment.from_file(audio_path)
+    total_duration = len(audio) / 1000.0
+    for idx, (vad_start, vad_end) in enumerate(vad_regions):
+        # Find Whisper segments overlapping with this VAD region
+        overlapping = [
+            seg for seg in whisper_segments
+            if not (seg['end'] <= vad_start or seg['start'] >= vad_end)
+        ]
+        if not overlapping:
+            continue
+        # Merge text and adjust boundaries as needed
+        merged_text = " ".join(seg['text'] for seg in overlapping)
+        seg_start = max(vad_start, overlapping[0]['start'])
+        seg_end = min(vad_end, overlapping[-1]['end'])
+        if seg_end - seg_start < min_duration_s:
+            continue
+        # Extract audio and save
+        extract_start_ms = max(0, int(seg_start * 1000) - padding_ms)
+        extract_end_ms = min(len(audio), int(seg_end * 1000) + padding_ms)
+        soundbite_audio = audio[extract_start_ms:extract_end_ms]
+        # Sanitize filename
+        safe_text = re.sub(r'[^\w\-_\. ]', '_', merged_text)[:max_filename_len-12]
+        soundbite_filename = f"{idx:04d}_{safe_text}.wav"
+        soundbite_path = os.path.join(output_dir, soundbite_filename)
+        # Export
+        soundbite_audio.export(soundbite_path, format=format)
+        soundbites.append({
+            "file": soundbite_path,
+            "start": seg_start,
+            "end": seg_end,
+            "duration": seg_end - seg_start,
+            "text": merged_text,
+            "vad_region": (vad_start, vad_end),
+            "index": idx
+        })
+    return soundbites
 
 # Example Usage (for testing purposes)
 if __name__ == '__main__':

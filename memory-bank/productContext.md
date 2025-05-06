@@ -1,4 +1,21 @@
-# Product Context
+# Product Context: WhisperBite
+
+## Why This Project Exists
+- Audio content is often inaccessible to the deaf, hard of hearing, or those who need to search or analyze conversations.
+- Existing tools provide either transcription or event annotation, but not both in a unified, context-rich format.
+
+## Problems Solved
+- WhisperBite combines speaker-based transcription (who said what, when) with contextual event annotation (what else was happening), making audio content accessible, searchable, and scene-aware.
+- Enables downstream AI (LLMs, image generation) to reconstruct or illustrate scenes from audio.
+
+## How It Should Work
+- User provides an audio file (podcast, call, show, etc.).
+- The tool separates vocals, diarizes speakers, transcribes each segment, and annotates the timeline with events (music, laughter, etc.).
+- Output is a structured, speaker-attributed, context-annotated transcript and metadata.
+
+## User Experience Goals
+- Make audio content understandable and vivid for everyone, including the deaf.
+- Provide outputs that are easy to search, analyze, and use for further AI-driven scene reconstruction or illustration.
 
 ## Purpose
 WhisperBite addresses the need for sophisticated audio processing in various domains:

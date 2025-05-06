@@ -30,34 +30,20 @@ def apply_temporal_nms(
 ) -> List[Dict]:
     """Apply temporal non-maximum suppression to events."""
     if not events:
-        logging.debug("[NMS] Input events list is empty.") # Changed to DEBUG
+        logging.debug("[NMS] Input events list is empty.")
         return []
-    
-    # Log input events
-    logging.info(f"[NMS] Applying NMS to {len(events)} events with min_gap={min_gap_seconds}s") # Keep INFO for summary
-    
-    # Sort by confidence
+    logging.info(f"[NMS] Applying NMS to {len(events)} events with min_gap={min_gap_seconds}s")
     sorted_events = sorted(events, key=lambda x: x.get('confidence', 0.0), reverse=True)
-    
-    # Keep track of used time windows
     used_times = set()
     filtered_events = []
-    
-    logging.debug("[NMS] Processing sorted events:") # Changed to DEBUG
     for i, event in enumerate(sorted_events):
         start_time = event.get('start')
         confidence = event.get('confidence', 0.0)
         event_type = event.get('type', 'Unknown')
-        
-        # Ensure start time is valid
         if start_time is None or not isinstance(start_time, (int, float)):
             logging.warning(f"  [NMS Skip {i}] Invalid or missing start time for event: {event}")
             continue
-            
         time_window = int(start_time)
-        logging.debug(f"  [NMS Check {i}] Event: {event_type}@{start_time:.2f} (Conf: {confidence:.3f}, Window: {time_window})") # Changed to DEBUG
-        
-        # Check if any nearby windows are used
         nearby_used = False
         for t in range(
             time_window - int(min_gap_seconds) + 1,
@@ -65,17 +51,12 @@ def apply_temporal_nms(
         ):
             if t in used_times:
                 nearby_used = True
-                logging.debug(f"    -> Nearby window {t} already used. Suppressing.") # Changed to DEBUG
                 break
-        
         if not nearby_used:
-            logging.debug(f"    -> Keeping event. Marking window {time_window} as used.") # Changed to DEBUG
             filtered_events.append(event)
             used_times.add(time_window)
-    
-    # Sort by time for final output
     final_sorted_events = sorted(filtered_events, key=lambda x: x.get('start', 0.0))
-    logging.info(f"[NMS] Filtered events count: {len(final_sorted_events)}") # Keep INFO for summary
+    logging.info(f"[NMS] Filtered events count: {len(final_sorted_events)}")
     return final_sorted_events
 
 # --- New Refactored Event Detection Function ---
@@ -126,7 +107,7 @@ def run_clap_event_detection(
         logging.info("Precomputing text features for event detection...")
         t_text_start = time.time()
         try:
-             with torch.amp.autocast(device_type=device.type): # Use device.type for autocast
+             with torch.amp.autocast(device_type=device.type):
                 text_inputs = clap_processor(
                     text=target_events,
                     return_tensors="pt",
@@ -178,12 +159,34 @@ def run_clap_event_detection(
                         inputs = {k: v.to(device) for k, v in inputs.items()}
                         logging.debug(f"[CHUNKPROC {i}] inputs.to(device) call took: {time.time() - t_call_to_device:.4f}s") # DEBUG level
                         logging.debug(f"[CHUNKPROC {i}] Audio inputs processed and moved to device.") # DEBUG level
+
+                        # --- Device Validation ---
+                        model_device = next(clap_model.parameters()).device
+                        # Accept 'cuda' and 'cuda:0' as equivalent (and similar for other device types)
+                        def device_equivalent(a, b):
+                            # Both are torch.device
+                            if a.type != b.type:
+                                return False
+                            # If either index is None or 0, treat as equivalent (single GPU)
+                            a_idx = getattr(a, 'index', None)
+                            b_idx = getattr(b, 'index', None)
+                            if (a_idx in (None, 0) and b_idx in (None, 0)):
+                                return True
+                            return a_idx == b_idx
+                        if not device_equivalent(model_device, device):
+                            logging.error(f"[CHUNKPROC {i}] Model is on {model_device}, expected {device}. Aborting chunk.")
+                            raise RuntimeError(f"CLAP model device mismatch: {model_device} != {device}")
+                        for k, v in inputs.items():
+                            if hasattr(v, 'device') and not device_equivalent(v.device, device):
+                                logging.error(f"[CHUNKPROC {i}] Input tensor '{k}' is on {v.device}, expected {device}. Aborting chunk.")
+                                raise RuntimeError(f"CLAP input tensor device mismatch: {k} on {v.device} != {device}")
+                        # --- End Device Validation ---
                         
                         # Get embeddings
                         logging.debug(f"[CHUNKPROC {i}] Getting audio features...") # DEBUG level
                         with torch.no_grad():
                             logging.debug(f"[CHUNKPROC {i}] Entering no_grad context: {time.time() - t_inner_start:.4f}s") # DEBUG level
-                            logging.debug(f"[CHUNKPROC {i}] Model device: {next(clap_model.parameters()).device}") # DEBUG level
+                            logging.debug(f"[CHUNKPROC {i}] Model device: {model_device}") # DEBUG level
                             logging.debug(f"[CHUNKPROC {i}] Audio input device: {inputs['input_features'].device if 'input_features' in inputs else 'N/A'}") # DEBUG level
                             
                             t_call_get_features = time.time()
@@ -234,10 +237,10 @@ def run_clap_event_detection(
                     logging.error("Full traceback:", exc_info=True)
                     # Continue to next chunk
                 finally:
-                    # Explicitly delete intermediate tensors
-                    del inputs
-                    del audio_features
-                    del similarity
+                    # Explicitly delete intermediate tensors if they exist
+                    for var in ('inputs', 'audio_features', 'similarity'):
+                        if var in locals():
+                            del locals()[var]
                     if device.type == 'cuda':
                          torch.cuda.empty_cache()
                     logging.debug(f"[CHUNKPROC {i}] Chunk processing finished, cache cleared.") # DEBUG level

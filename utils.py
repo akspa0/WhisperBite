@@ -7,10 +7,14 @@ from datetime import datetime
 from pydub import AudioSegment
 import yt_dlp
 import json
+from typing import Optional, Tuple, Union
+import numpy as np
+import soundfile as sf
 
 def sanitize_filename(name, max_length=128):
     """Sanitize filename by removing unwanted characters and limiting length."""
-    sanitized = "".join(char if char.isalnum() or char in " _-" else "_" for char in name)[:max_length]
+    # Allow alphanumeric, space, underscore, hyphen, AND period
+    sanitized = "".join(char if char.isalnum() or char in " _-." else "_" for char in name)[:max_length]
     # Replace multiple consecutive underscores with a single one
     while "__" in sanitized:
         sanitized = sanitized.replace("__", "_")
@@ -172,3 +176,74 @@ def create_thumbnail_waveform(audio_file, output_path):
     except Exception as e:
         logging.warning(f"Error creating waveform thumbnail: {e}")
         return None
+
+def extract_audio_segment(
+    source_audio_path: str,
+    start_time: float,
+    end_time: float,
+    output_path: Optional[str] = None
+) -> Union[str, Tuple[np.ndarray, int]]:
+    """
+    Extracts an audio segment from a source file using start and end times.
+
+    Args:
+        source_audio_path (str): Path to the source audio file.
+        start_time (float): Start time of the segment in seconds.
+        end_time (float): End time of the segment in seconds.
+        output_path (Optional[str]): If provided, saves the segment to this path.
+                                     Otherwise, returns the audio data and sample rate.
+
+    Returns:
+        Union[str, Tuple[np.ndarray, int]]: Path to the saved segment file if output_path is given,
+                                             otherwise a tuple (audio_data, sample_rate).
+
+    Raises:
+        FileNotFoundError: If the source audio file doesn't exist.
+        ValueError: If start_time or end_time are invalid.
+        Exception: For other audio processing errors.
+    """
+    if not os.path.exists(source_audio_path):
+        raise FileNotFoundError(f"Source audio file not found: {source_audio_path}")
+
+    try:
+        with sf.SoundFile(source_audio_path, 'r') as infile:
+            sample_rate = infile.samplerate
+            channels = infile.channels
+            if start_time < 0 or end_time < 0 or start_time >= end_time or end_time > infile.frames / sample_rate:
+                 # Allow end_time to be slightly beyond duration due to float precision
+                 if end_time > (infile.frames / sample_rate) + 0.01:
+                    raise ValueError(f"Invalid start/end times ({start_time:.2f}s / {end_time:.2f}s) for file duration {infile.frames / sample_rate:.2f}s")
+                 end_time = min(end_time, infile.frames / sample_rate) # Clip end time precisely
+                 if start_time >= end_time:
+                     raise ValueError(f"Start time ({start_time:.2f}s) cannot be >= end time ({end_time:.2f}s) after clipping.")
+
+            start_frame = int(start_time * sample_rate)
+            # Calculate frames to read, ensuring it doesn't exceed file boundaries
+            frames_to_read = min(int((end_time - start_time) * sample_rate), infile.frames - start_frame)
+
+            if frames_to_read <= 0:
+                 logging.warning(f"Calculated zero frames to read for segment {start_time:.2f}s - {end_time:.2f}s. Skipping extraction.")
+                 # Return empty data or handle as needed
+                 if output_path:
+                     # Create an empty file? Or raise error? Let's return None for path
+                     return None # Indicate failure to extract non-empty segment
+                 else:
+                     return (np.array([]), sample_rate) # Return empty numpy array
+
+            infile.seek(start_frame)
+            audio_data = infile.read(frames=frames_to_read, dtype='float32') # Read as float32 for Whisper
+
+            if output_path:
+                # Ensure output directory exists
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                # Write using soundfile
+                sf.write(output_path, audio_data, sample_rate, format='WAV', subtype='PCM_16') # Save as 16-bit PCM WAV
+                logging.debug(f"Extracted segment ({start_time:.2f}s - {end_time:.2f}s) to {output_path}")
+                return output_path
+            else:
+                logging.debug(f"Extracted segment ({start_time:.2f}s - {end_time:.2f}s) to memory.")
+                return (audio_data, sample_rate)
+
+    except Exception as e:
+        logging.error(f"Error extracting audio segment ({start_time:.2f}s - {end_time:.2f}s) from {source_audio_path}: {e}")
+        raise # Re-raise the exception

@@ -47,111 +47,68 @@ def stop_current_job() -> None:
         return "Stop requested. The current job will terminate at the next safe point."
     return "No job is currently running."
 
+def load_settings(settings_path="settings.yaml"):
+    if not os.path.exists(settings_path):
+        raise FileNotFoundError(f"Global settings file not found: {settings_path}")
+    with open(settings_path, "r") as f:
+        return yaml.safe_load(f)
+
 def run_pipeline(
     input_file: str,
     output_dir: str,
-    preset_name: str,
+    workflow_yaml: str,
+    settings: dict,
     **kwargs
 ) -> Dict[str, Any]:
     """
-    Run the audio processing pipeline with the selected preset.
-    
-    Args:
-        input_file: Path to input audio/video file
-        output_dir: Directory to save outputs
-        preset_name: Name of the preset to use
-        **kwargs: Additional arguments to pass to the preset
-    
-    Returns:
-        Dict containing processing results and output paths
+    Run the audio processing pipeline with the selected workflow and global settings.
     """
     global current_job, stop_requested, processing_stop_event
     stop_requested = False
     processing_stop_event = threading.Event()
-    file_handler = None # Initialize file handler variable
-    
+    file_handler = None
     try:
-        # --- Create Unique Output Directory (Moved from process_wrapper) --- 
-        # This ensures the log file path is determined before logging starts for the run
-        base_output_folder = output_dir # Expecting unique dir path from wrapper now
+        base_output_folder = output_dir
         if not os.path.exists(base_output_folder):
             try:
                 os.makedirs(base_output_folder, exist_ok=True)
                 logger.info(f"Created output directory: {base_output_folder}")
             except OSError as e:
-                 logger.error(f"Failed to create output directory {base_output_folder}: {e}")
-                 # Return error early if dir creation fails
-                 return {"status": "error", "error": f"Failed to create output dir: {e}"}
-                 
-        # --- Setup File Logging for this run --- 
+                logger.error(f"Failed to create output directory {base_output_folder}: {e}")
+                return {"status": "error", "error": f"Failed to create output dir: {e}"}
         log_file_path = os.path.join(base_output_folder, "processing.log")
-        file_handler = logging.FileHandler(log_file_path, mode='w') # 'w' to overwrite previous logs if run dir reused (shouldn't happen)
+        file_handler = logging.FileHandler(log_file_path, mode='w')
         formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
         file_handler.setFormatter(formatter)
-        logging.getLogger().addHandler(file_handler) # Add handler to root logger
+        logging.getLogger().addHandler(file_handler)
         logger.info(f"Logging for this run will be saved to: {log_file_path}")
-        # --- End File Logging Setup ---
-        
-        # Get preset configuration
-        preset_funcs = {
-            "Standard": get_standard_preset,
-            "Transcription": get_transcription_preset,
-            "Event-Guided": get_event_guided_preset
-        }
-        
-        if preset_name not in preset_funcs:
-            raise ValueError(f"Unknown preset: {preset_name}")
-            
-        preset = preset_funcs[preset_name](**kwargs)
-        logger.info(f"Using preset: {preset_name}")
-        logger.debug(f"Preset config generated: {preset}")
-        
-        # Create output directory if it doesn't exist (redundant check, but safe)
-        # os.makedirs(output_dir, exist_ok=True) # Output dir is now base_output_folder
-        
-        # Save preset configuration
-        config_path = os.path.join(base_output_folder, "config.yaml")
+        # Save settings for this run
+        config_path = os.path.join(base_output_folder, "settings_used.yaml")
         with open(config_path, "w") as f:
-            yaml.dump(preset, f)
-        logger.info(f"Saved preset config to: {config_path}")
-            
-        # Process audio with preset configuration
+            yaml.dump(settings, f)
+        logger.info(f"Saved settings to: {config_path}")
+        # Process audio with workflow and settings
         results = process_audio(
-            input_file=input_file, 
-            output_dir=base_output_folder, # Pass the unique run directory
-            preset_name=preset_name, 
-            preset_config=preset["config"], 
+            input_file=input_file,
+            output_dir=base_output_folder,
+            workflow_yaml=workflow_yaml,
+            settings=settings,
             stop_event=processing_stop_event
         )
-        
-        # Check if stopped after process_audio returned
         if stop_requested:
-             logger.info("Pipeline stopped after process_audio completed.")
-             # Decide how to handle this - maybe return a specific stopped status
-             # For now, treat as success but maybe add a note
-             results['status'] = 'stopped_post_processing'
-
-        # Ensure results dictionary is returned even if process_audio had issues internally
+            logger.info("Pipeline stopped after process_audio completed.")
+            results['status'] = 'stopped_post_processing'
         if not isinstance(results, dict):
-             logger.error(f"process_audio returned unexpected type: {type(results)}")
-             results = {"status": "error", "error": "Internal processing function error."}
-
-        # Add paths relative to the run directory if possible
-        # Example: (adjust keys based on actual results dict from process_audio)
+            logger.error(f"process_audio returned unexpected type: {type(results)}")
+            results = {"status": "error", "error": "Internal processing function error."}
         if results.get("status") not in ["error", "cancelled", "stopped_post_processing"]:
             results["output_run_directory"] = base_output_folder
-            # Add other key paths if needed
-
-        # Update status based on process_audio result before returning
         final_status = results.get("status", "unknown")
-
         return {
-            "status": final_status, 
-            "preset_used": preset_name,
-            "config_file": config_path,
+            "status": final_status,
+            "settings_file": config_path,
             **results
         }
-        
     except Exception as e:
         logger.exception("Error in processing pipeline (run_pipeline)")
         return {
@@ -159,12 +116,10 @@ def run_pipeline(
             "error": str(e)
         }
     finally:
-        # --- Remove File Handler for this run --- 
         if file_handler:
             logger.info(f"Removing file handler for {log_file_path}")
             logging.getLogger().removeHandler(file_handler)
             file_handler.close()
-        # --- End File Handler Removal ---
 
 def process_wrapper(
     input_file,
@@ -188,7 +143,14 @@ def process_wrapper(
     clap_target_prompts_input,
     clap_threshold_input,
     clap_chunk_duration_input,
-    pass1_event_prompts_override
+    pass1_event_prompts_textbox,
+    enable_vad_soundbites,
+    vad_threshold,
+    vad_padding,
+    vad_min_duration,
+    clap_pass1_prompts,
+    clap_pass2_prompts,
+    clap_pass3_prompts
 ):
     """Wrapper function to handle Gradio interface inputs."""
     global current_job, stop_requested, processing_stop_event
@@ -254,12 +216,19 @@ def process_wrapper(
             "event_min_gap": event_min_gap,
             "clap_target_prompts": [p.strip() for p in clap_target_prompts_input.split(",") if p.strip()],
             "clap_threshold": clap_threshold_input,
-            "clap_chunk_duration": clap_chunk_duration_input
+            "clap_chunk_duration": clap_chunk_duration_input,
+            "enable_vad_soundbites": enable_vad_soundbites,
+            "vad_threshold": vad_threshold,
+            "vad_padding": vad_padding,
+            "vad_min_duration": vad_min_duration,
+            "clap_pass1_prompts": [p.strip() for p in clap_pass1_prompts.split(",") if p.strip()],
+            "clap_pass2_prompts": [p.strip() for p in clap_pass2_prompts.split(",") if p.strip()],
+            "clap_pass3_prompts": [p.strip() for p in clap_pass3_prompts.split(",") if p.strip()]
         }
 
         # <<< Add Pass 1 prompts override for Event-Guided preset >>>
-        if preset == "Event-Guided" and pass1_event_prompts_override:
-            custom_pass1_prompts = [p.strip() for p in pass1_event_prompts_override.split(',') if p.strip()]
+        if preset == "Event-Guided" and pass1_event_prompts_textbox:
+            custom_pass1_prompts = [p.strip() for p in pass1_event_prompts_textbox.split(',') if p.strip()]
             if custom_pass1_prompts: # Only override if the user actually typed something valid
                 # <<< Use the direct key expected by get_event_guided_preset >>>
                 preset_kwargs['event_target_prompts'] = custom_pass1_prompts 
@@ -272,8 +241,8 @@ def process_wrapper(
         results = run_pipeline(
             input_file=file_path,
             output_dir=run_output_dir,
-            preset_name=preset,
-            **preset_kwargs
+            workflow_yaml=preset,
+            settings=preset_kwargs
         )
         
         # Process the results for Gradio output
@@ -411,7 +380,6 @@ def build_interface():
                     label="Processing Preset",
                     info="Select a processing workflow. Detection options below depend on the chosen preset."
                 )
-                
                 # Standard Options
                 with gr.Group(visible=True) as standard_options_group:
                     gr.Markdown("### General Processing")
@@ -423,24 +391,22 @@ def build_interface():
                             info="Larger models are more accurate but slower"
                         )
                         hf_token = gr.Textbox(label="Hugging Face Token", type="password", info="Required for some models/diarization. huggingface.co/settings/tokens.")
-                    
                     gr.Markdown("### Speaker Diarization")
-                    gr.HTML("<p style='font-size:small;color:grey'>Requires Pyannote & HF Token. Only runs if preset includes transcription/diarization.</p>") # Info text
+                    gr.HTML("<p style='font-size:small;color:grey'>Requires Pyannote & HF Token. Only runs if preset includes transcription/diarization.</p>")
                     with gr.Row():
                         num_speakers = gr.Slider(
                             label="Number of Speakers", minimum=1, maximum=10, step=1, value=2,
-                            interactive=True # Assume enabled unless preset disables diarization
+                            interactive=True
                         )
                         auto_speakers = gr.Checkbox(
                             label="Auto-detect Speaker Count", value=False,
-                            interactive=True # Assume enabled unless preset disables diarization
+                            interactive=True
                         )
-                        
                     gr.Markdown("### Audio Handling")
                     with gr.Row():
                         enable_vocal_separation = gr.Checkbox(
                             label="Enable Vocal Separation (Demucs)", value=False,
-                            interactive=True # Assume enabled unless preset disables it
+                            interactive=True
                         )
                         split_stereo = gr.Checkbox(
                             label="Split Stereo Channels (if stereo input)", value=False,
@@ -450,7 +416,25 @@ def build_interface():
                             label="Force Mono Output Snippets", value=False,
                             info="Convert all output speaker/word audio files to mono."
                         )
-                        
+                    # --- Soundbite Extraction Settings ---
+                    gr.Markdown("### Soundbite Extraction")
+                    with gr.Row():
+                        enable_vad_soundbites = gr.Checkbox(
+                            label="Use VAD for Natural Soundbite Boundaries", value=True,
+                            info="Use Voice Activity Detection to extract soundbites at natural speech regions, aligned with transcription."
+                        )
+                        vad_threshold = gr.Slider(
+                            label="VAD Threshold", minimum=0.1, maximum=0.9, step=0.05, value=0.5,
+                            info="Sensitivity for speech detection (lower = more sensitive)"
+                        )
+                        vad_padding = gr.Number(
+                            label="Soundbite Padding (ms)", value=150,
+                            info="Padding added before/after each soundbite."
+                        )
+                        vad_min_duration = gr.Number(
+                            label="Min Soundbite Duration (s)", value=0.2,
+                            info="Minimum duration for a soundbite to be saved."
+                        )
                     gr.Markdown("### Advanced Features")
                     with gr.Row():
                         enable_word_extraction = gr.Checkbox(
@@ -465,7 +449,7 @@ def build_interface():
                         second_pass_min_duration = gr.Slider(
                             label="Second Pass Min Duration (s)", minimum=0.5, maximum=30.0, step=0.5, value=5.0,
                             info="Min segment length for second pass",
-                            interactive=False # Depends on enable_second_pass
+                            interactive=False
                         )
                         
             # <<< NEW DETECTION TAB >>>
@@ -527,6 +511,28 @@ def build_interface():
                     )
                 # <<< End Pass 1 Override >>>
 
+                # CLAP Pass 1: Call Segmentation Prompts
+                clap_pass1_prompts = gr.Textbox(
+                    label="CLAP Call Segmentation Prompts (Pass 1)",
+                    placeholder="e.g., speech, telephone, hang-up",
+                    value="speech, telephone, hang-up",
+                    info="Prompts for CLAP Pass 1: Used to segment calls/conversations."
+                )
+                # CLAP Pass 2: Event Annotation 1
+                clap_pass2_prompts = gr.Textbox(
+                    label="CLAP Event Annotation Prompts (Pass 2)",
+                    placeholder="e.g., interference, static, noise",
+                    value="interference, static, noise",
+                    info="Prompts for CLAP Pass 2: Used to annotate non-speech events (e.g., interference, static)."
+                )
+                # CLAP Pass 3: Event Annotation 2
+                clap_pass3_prompts = gr.Textbox(
+                    label="CLAP Additional Annotation Prompts (Pass 3)",
+                    placeholder="e.g., music, laughter, applause",
+                    value="music, laughter, applause",
+                    info="Prompts for CLAP Pass 3: Used to annotate additional context (e.g., music, laughter, applause)."
+                )
+
         with gr.Row():
             submit_button = gr.Button("Process Audio", variant="primary")
             stop_button = gr.Button("Stop Processing", variant="stop")
@@ -572,7 +578,10 @@ def build_interface():
                 clap_chunk_duration_input,
                 # Pass 1 Settings
                 pass1_settings_accordion,
-                pass1_event_prompts_textbox
+                pass1_event_prompts_textbox,
+                clap_pass1_prompts,
+                clap_pass2_prompts,
+                clap_pass3_prompts
             ]
         )
         
@@ -604,8 +613,15 @@ def build_interface():
                 clap_target_prompts_input,
                 clap_threshold_input,
                 clap_chunk_duration_input,
-                # New Pass 1 Prompts Override
-                pass1_event_prompts_textbox
+                pass1_event_prompts_textbox,
+                clap_pass1_prompts,
+                clap_pass2_prompts,
+                clap_pass3_prompts,
+                # VAD Soundbite Extraction (NEW) - must come last to match process_wrapper
+                enable_vad_soundbites,
+                vad_threshold,
+                vad_padding,
+                vad_min_duration
             ],
             outputs=[output_message, result_file, transcript_preview]
         )
