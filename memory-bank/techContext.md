@@ -1,55 +1,36 @@
-# Tech Context
+# Tech Context: WhisperBite (2025 Modular Refactor)
 
-**Core Language:** Python 3
+## Core Technologies
 
-**Key Libraries:**
-*   **`gradio`**: Used by `app.py` to create the web UI.
-*   `openai-whisper`: Core speech-to-text transcription (`whisperBite.py`).
-*   `pyannote.audio`: Speaker diarization (`whisperBite.py`). Requires Hugging Face token.
-*   `torch`: Required backend for Whisper and Pyannote (supports CPU/GPU).
-*   `pydub`: Audio manipulation (`whisperBite.py`).
-*   `argparse`: Command-line argument parsing.
-*   `requests`: For downloading URLs (via `utils.py`).
-*   `yt-dlp`: Used by `utils.download_audio` for URL downloads.
-*   `demucs`: Optional library for vocal separation (installed via pip).
-*   **`transformers`**: Used for CLAP-based sound event detection.
-*   `librosa`: Used for audio loading and resampling (dependency for Whisper/sound detection).
-*   `soundfile`: Often required as a backend by `librosa`.
-*   **`PyYAML`**: For writing structured YAML output.
-*   Standard libraries: `logging`, `os`, `sys`, `datetime`, `json`, `subprocess`, `shutil`, `glob`, `tempfile`, `re`, `yaml`.
+- **Python 3** (core language)
+- **PyTorch, pyannote.audio, openai-whisper, transformers (CLAP), pydub, soundfile, ffmpeg**
+- **YAML** for workflow/config definition and output
+- **Module Registry:** All modules are Python classes/functions with explicit input/output/settings, registered for workflow use.
+- **Rule Engine:** Explicit, schema-validated rules (YAML or Python) map audio annotations to workflow steps.
 
-**External Dependencies (Command Line Tools):**
-*   `ffmpeg`/`ffprobe`: **Required** for audio normalization, video extraction, **and media info extraction.**
-*   `demucs` (command-line): **Implicitly required** if `demucs` Python package is used for vocal separation. **Uses `--segment` and `--overlap` internally for large file processing.**
+## Modularization Benefits
 
-**Development Setup:**
-*   Python environment with libraries installed from `requirements.txt`.
-*   `ffmpeg` and optionally `demucs` installed and in PATH.
-*   Internet access for model/audio downloads.
-*   Hugging Face account and API token required for diarization.
+- Each module is small, focused, and independently testable.
+- Changes in one module do not affect others, reducing regressions.
+- Easier onboarding, documentation, and extension.
 
-**Execution:**
-*   **Web UI:** `python app.py` (Optional args: `--public`, `--port`).
-*   **CLI:** `python whisperBite.py`.
+## Path Forward
+- Scaffold and migrate to a modular, multi-file codebase.
+- Complete and document all components for CLAP-driven segmentation.
+- Prepare for LLM-driven rule engine as an optional enhancement.
 
-**Hardware:**
-*   CUDA-compatible GPU recommended, CPU supported.
+## Development Setup
 
-**Configuration:**
-*   **Web UI (`app.py`):** Interactive Gradio components.
-*   **CLI (`whisperBite.py`):** `argparse` arguments, including:
-    *   `--enable_word_extraction`: Toggle word audio snippet generation (default: off).
-    *   `--enable_second_pass`: Toggle diarization refinement pass (default: off).
-    *   `--second_pass_min_duration`: Minimum segment length (seconds) for second pass (default: 5.0).
-    *   `--auto_speakers`: Toggle automatic speaker count detection (default: off).
-    *   `--enable_vocal_separation`: Toggle Demucs vocal separation (default: off).
-    *   **`--split_stereo`**: Process L/R channels separately if input is stereo (default: off).
-    *   **`--attempt_sound_detection`**: Toggle CLAP-based sound detection (default: off).
-*   **Output Format:** **Master transcript is `master_transcript.yaml`, containing metadata and structured segment data. Outputs are organized into a unique, timestamped directory per run, with step-specific subdirectories (e.g., `normalized/`, `demucs/`, `speakers/`, `events/`).**
-*   Speaker Labels: Format is `S0`, `S1`, etc. **If `--split_stereo` is used, labels become `S0_L`, `S0_R`, etc.**
-*   **Sound Detection:** Uses **CLAP model** from `transformers` to compare audio embeddings against text prompts for target sounds.
-*   **Event Detection:** Also uses **CLAP model** for detecting broader event categories.
-*   Some internal parameters in `whisperBite.py`
+```mermaid
+flowchart TD
+    VENV[Python venv] --> Install[Install requirements.txt]
+    Install --> FFmpeg[Install ffmpeg/demucs]
+    FFmpeg --> Token[Add Hugging Face token (for diarization)]
+    Token --> Run[Run CLI or UI]
+```
+
+## Output & Sharing
+- All runs produce a `config.yaml` (sans secrets) and full metadata for reproducibility and sharing.
 
 # Technical Context
 

@@ -933,10 +933,10 @@ def extract_soundbites(segment_audio_path: str, segment_annotations: Dict[str, L
     logger.info(f"Extracted {len(soundbite_paths)} soundbites for {os.path.basename(segment_audio_path)}.")
     return soundbite_paths
 
-def detect_speech_regions_vad(audio_path: str, sampling_rate: int = 16000, threshold: float = 0.5) -> list[tuple[float, float]]:
+def detect_speech_regions_vad(audio_path: str, sampling_rate: int = 16000, threshold: float = 0.5) -> list[dict]:
     """
     Detects speech regions in an audio file using Silero VAD.
-    Returns a list of (start, end) tuples in seconds for each detected speech region.
+    Returns a list of dicts with 'start' and 'end' keys in seconds for each detected speech region.
     """
     # Load Silero VAD model
     model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', trust_repo=True)
@@ -947,12 +947,12 @@ def detect_speech_regions_vad(audio_path: str, sampling_rate: int = 16000, thres
     # Run VAD
     speech_timestamps = get_speech_timestamps(wav, model, threshold=threshold)
 
-    # Convert to (start, end) in seconds
+    # Convert to dicts with 'start' and 'end' in seconds
     speech_regions = []
     for ts in speech_timestamps:
         start_sec = ts['start'] / sampling_rate
         end_sec = ts['end'] / sampling_rate
-        speech_regions.append((start_sec, end_sec))
+        speech_regions.append({'start': start_sec, 'end': end_sec})
     return speech_regions
 
 def extract_vad_aligned_soundbites(

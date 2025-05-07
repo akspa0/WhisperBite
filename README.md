@@ -1,83 +1,107 @@
-# WhisperBite
+# WhisperBite Modular CLAP Pipeline
 
-WhisperBite is a tool built with Gradio that processes audio and video files to perform speaker diarization (identifying who spoke when) and transcription using OpenAI's Whisper model. It can handle various inputs, separate vocals, identify non-speech sounds, extract individual words, and refine results with a second pass.
+WhisperBite is a modular, extensible audio processing framework for generating richly annotated, accessible, and searchable transcripts from audio or video. The 2025 refactor introduces a fully modular, rule-driven architecture with a focus on reproducibility, extensibility, and workflow sharing.
 
 ## Features
+- **Modular Pipeline:** Each processing step (normalization, CLAP event detection, segmentation, diarization, transcription, soundbite extraction, output writing) is a separate module.
+- **CLAP-Driven Segmentation:** Uses CLAP to detect events (e.g., speech, ringing, hang-up) and segment audio for downstream processing.
+- **Speaker Diarization:** Accurate speaker separation using pyannote.audio.
+- **Transcription:** High-quality transcription using OpenAI Whisper, with optional word-level timestamps.
+- **Soundbite Extraction:** Extracts per-event and per-speaker soundbites with canonical naming.
+- **Reproducible Outputs:** All runs produce a master transcript, per-segment TXT files, YAML metadata, and organized output directories.
+- **Extensible:** Add new modules, rules, or workflows without breaking existing functionality.
 
-*   **Input:** Accepts single audio/video files, folders (processes newest file), or URLs (YouTube, direct links).
-*   **Audio Extraction:** Automatically extracts audio from video inputs.
-*   **Normalization:** Normalizes audio loudness to a standard level.
-*   **Vocal Separation (Optional):** Uses Demucs to separate vocals from background noise/music. Generates `vocals.wav` and `no_vocals.wav` tracks.
-*   **Sound Detection (Optional):** If Vocal Separation is enabled, can attempt to identify non-speech sounds (e.g., `[ music ]`, `( noise )`) by running Whisper on the `no_vocals.wav` track.
-*   **Speaker Diarization:** Identifies different speakers using `pyannote.audio` (labels formatted as `S0`, `S1`, etc.).
-*   **Transcription:** Transcribes the speech for each identified speaker using Whisper.
-*   **Output:** Creates:
-    *   Individual audio segments per speaker turn (using `S0`, `S1`... naming).
-    *   Text transcripts per speaker turn.
-    *   A master transcript combining speech segments and detected sound events chronologically.
-    *   Optional individual word audio snippets with timestamps.
-    *   A zip file containing all results.
-*   **Second Pass Refinement (Optional):** Re-analyzes longer segments to potentially improve speaker separation accuracy. Attempts to merge refined segments into the master transcript, replacing the originals.
+## Installation
 
-## Prerequisites
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/WhisperBite.git
+   cd WhisperBite
+   ```
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. **Install system dependencies:**
+   - [FFmpeg](https://ffmpeg.org/download.html) (required for audio processing)
+   - [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) (optional, for GPU acceleration)
 
-1.  **Python:** Version 3.9 or higher recommended.
-2.  **ffmpeg:** Required for audio normalization and extraction from video. You must install it separately and ensure it's available in your system's PATH.
-    *   **Windows:** Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add the `bin` directory to your PATH environment variable.
-    *   **macOS (using Homebrew):** `brew install ffmpeg`
-    *   **Linux (using apt):** `sudo apt update && sudo apt install ffmpeg`
-3.  **PyTorch:** The `requirements.txt` file lists `torch`. Depending on your system (CPU-only or GPU with CUDA), you might need a specific version. Check the [PyTorch website](https://pytorch.org/get-started/locally/) for the correct installation command for your setup.
-4.  **Demucs (Optional but Recommended):** Required for the Vocal Separation and Sound Detection features. Install via pip: `pip install demucs`.
+4. **(Optional) Hugging Face Token:**
+   - For speaker diarization, obtain a token from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 
-## Setup
+## Usage
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository-url> # Replace with the actual URL
-    cd whisperBite
-    ```
+### Command-Line Interface (CLI)
 
-2.  **Create and activate a virtual environment (recommended):**
-    ```bash
-    python -m venv venv
-    # Windows
-    .\venv\Scripts\activate
-    # macOS/Linux
-    source venv/bin/activate
-    ```
-
-3.  **Install Python dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-    This installs core libraries like `gradio`, `openai-whisper`, `pyannote.audio`, `torch`, `pydub`, `demucs` (optional features), and `yt-dlp` (for URL downloads).
-    *Note: If you encounter issues with PyTorch, install it manually first using the command from the PyTorch website, then run the command above again.*
-
-4.  **Hugging Face Token:**
-    *   `pyannote.audio` requires a Hugging Face token for accessing diarization models.
-    *   Get a token from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (read access is sufficient).
-    *   You can either:
-        *   Set the `HF_TOKEN` environment variable before running the app.
-        *   Enter the token directly into the "Hugging Face Token" field in the Gradio UI.
-
-## Running the Application
-
-Once setup is complete, run the Gradio application:
+The modular CLAP pipeline can be run directly from the command line:
 
 ```bash
-python app.py
+python app.py --input path/to/audio.wav --output_dir ./whisper_output --hf_token YOUR_HF_TOKEN --model base --enable_vocal_separation --enable_word_extraction
 ```
 
-This will start a local web server. Open the provided URL (usually `http://127.0.0.1:7860`) in your browser to use the interface. Select your input, choose processing options (including the new "Attempt Sound Detection" checkbox if vocal separation is enabled), and click "Process Audio".
+**Arguments:**
+- `--input` (required): Path to the input audio or video file.
+- `--output_dir` (required): Directory to save all outputs.
+- `--hf_token`: Hugging Face token for pyannote diarization (required for speaker separation).
+- `--model`: Whisper model name (default: `base`). Options: `tiny`, `base`, `small`, `medium`, `large`, etc.
+- `--enable_vocal_separation`: Enable Demucs vocal separation (optional).
+- `--enable_word_extraction`: Enable word-level timestamp extraction (optional).
 
-## Notes
+**Example:**
+```bash
+python app.py --input test_audio/sample.wav --output_dir ./whisper_output --hf_token hf_xxx --model medium --enable_vocal_separation
+```
 
-*   **Speaker Labels:** Speaker labels in output directories and transcripts use the format `S0`, `S1`, `S2`, etc.
-*   **Vocal Separation:** Requires `demucs` (install via `pip install demucs`). If enabled, separation runs once before diarization. The resulting `vocals.wav` is used for speaker diarization and transcription.
-*   **Sound Detection:** This option requires Vocal Separation to be enabled. It runs the selected Whisper model on the `no_vocals.wav` track generated by Demucs and looks for segments containing only bracketed tags (like `[ music ]`, `[ sound ]`), parenthesized text, or musical notes (`♪`). These are added to the master transcript with the speaker label `SOUND`. Accuracy depends on Whisper's ability to tag these sounds.
-*   **Second Pass:** Analyzes longer first-pass segments to refine speaker labels. The master transcript attempts to merge these refinements, replacing the original segments. (Note: The merging logic is complex and may sometimes result in duplicates - further refinement is ongoing).
-*   **Resource Usage:** Whisper models (especially larger ones) and Demucs can be computationally intensive and require significant RAM/VRAM.
+### Output Structure
+
+Each run creates a unique output directory with the following structure:
+
+```
+<output_dir>/
+  master_transcript.txt
+  results.yaml
+  <Speaker_X>_transcriptions/
+    0000_hello_this_is_bob.txt
+    0000_hello_this_is_bob.wav
+    ...
+  <Speaker_X>_full_transcript.txt
+  ...
+```
+- **master_transcript.txt:** Global transcript with all segments, speakers, and timings.
+- **results.yaml:** YAML metadata summary of the run.
+- **<Speaker_X>_transcriptions/**: Per-speaker segment audio and transcripts.
+- **<Speaker_X>_full_transcript.txt:** Full transcript for each speaker.
+
+### Modular Architecture
+
+- All processing steps are implemented as independent modules in `modules/`.
+- The pipeline is orchestrated by the `ClapPipelineManager` in `core/clap_pipeline_manager.py`.
+- The module registry allows dynamic construction and execution of workflows.
+
+### Extending the Pipeline
+- Add new modules to `modules/` and register them in `app.py`.
+- Define new workflows or rules in YAML or Python.
+- See `config/presets.py` for workflow configuration examples.
+
+## Development & Testing
+- All modules are independently testable.
+- To run the pipeline on a test file:
+  ```bash
+  python app.py --input test_audio/sample.wav --output_dir ./whisper_output --hf_token hf_xxx
+  ```
+- Outputs will be saved in the specified output directory.
+
+## Requirements
+- Python 3.8+
+- PyTorch, pyannote.audio, openai-whisper, transformers, pydub, soundfile, ffmpeg, and other dependencies in `requirements.txt`.
+- GPU recommended for best performance.
 
 ## License
+MIT License
 
-MIT
+## Acknowledgments
+- [OpenAI Whisper](https://github.com/openai/whisper)
+- [pyannote.audio](https://github.com/pyannote/pyannote-audio)
+- [Hugging Face Transformers](https://github.com/huggingface/transformers)
+- [Demucs](https://github.com/facebookresearch/demucs)
+- [CLAP](https://github.com/LAION-AI/CLAP)

@@ -1,21 +1,42 @@
-# Product Context: WhisperBite
+# Product Context: WhisperBite (2025 Modular Refactor)
 
 ## Why This Project Exists
-- Audio content is often inaccessible to the deaf, hard of hearing, or those who need to search or analyze conversations.
-- Existing tools provide either transcription or event annotation, but not both in a unified, context-rich format.
+- Audio content is often inaccessible or hard to analyze, especially for multi-speaker or event-rich recordings.
+- Monolithic codebases lead to regressions, slow development, and headaches.
+- Modular, multi-file architecture enables maintainability, extensibility, and reliability.
 
 ## Problems Solved
-- WhisperBite combines speaker-based transcription (who said what, when) with contextual event annotation (what else was happening), making audio content accessible, searchable, and scene-aware.
-- Enables downstream AI (LLMs, image generation) to reconstruct or illustrate scenes from audio.
+- Modular, rule-driven workflows for audio processing, supporting both simple and advanced use cases.
+- Unified outputs: speaker-attributed, context-annotated transcripts and metadata, organized for downstream AI or human use.
+- Workflow sharing: Users can share and reproduce processing pipelines via `config.yaml`.
+- Each module is small, focused, and independently testable, reducing the risk of regressions.
+
+## User Experience Goals
+- Intuitive workflow authoring (YAML, UI planned).
+- Easy sharing and reproducibility of workflows.
+- Outputs are accessible, richly annotated, and easy to search or analyze.
+- Developers can extend or fix one module without breaking others.
+
+## Use Cases
+- Call center analysis, podcast transcription, content management, research, accessibility, and more.
+
+## Path Forward
+- Scaffold and migrate to a modular, multi-file codebase.
+- Implement and validate the CLAP-driven segmentation workflow as the baseline.
+- Expand documentation and workflow examples.
+- Prepare for UI-based workflow editing and LLM-driven orchestration.
+
+## Success Metrics
+- Output accuracy and completeness.
+- Workflow reproducibility and shareability.
+- User satisfaction with modularity and extensibility.
 
 ## How It Should Work
 - User provides an audio file (podcast, call, show, etc.).
 - The tool separates vocals, diarizes speakers, transcribes each segment, and annotates the timeline with events (music, laughter, etc.).
 - Output is a structured, speaker-attributed, context-annotated transcript and metadata.
-
-## User Experience Goals
-- Make audio content understandable and vivid for everyone, including the deaf.
-- Provide outputs that are easy to search, analyze, and use for further AI-driven scene reconstruction or illustration.
+- **Canonical pipeline order:** Input & normalization → Demucs → Diarization → Transcription → Soundbite extraction → CLAP annotation (context only) → Output writing.
+- **Robust output structure:** Always produce master transcript YAML, per-segment TXT files, and soundbites, matching legacy output format.
 
 ## Purpose
 WhisperBite addresses the need for sophisticated audio processing in various domains:
@@ -76,40 +97,6 @@ WhisperBite addresses the need for sophisticated audio processing in various dom
 - Accessible results through organized outputs
 - **Detailed, traceable output structure:** Unique timestamped run directory with subfolders for each processing step (`normalized/`, `demucs/`, `events/`, `sounds/`, etc.).
 
-## Use Cases
-
-### 1. Call Center Analysis
-- Call segmentation
-- Content transcription
-- Event detection
-
-### 2. Audio Processing
-- Track separation
-- Content analysis
-- Quality optimization
-
-### 3. Content Management
-- Call organization
-- Track preservation
-- Metadata management
-
-## Success Metrics
-
-### 1. Processing Accuracy
-- Call boundary precision
-- Transcription quality
-- Event detection accuracy
-
-### 2. Efficiency
-- Processing speed
-- Resource utilization
-- Output organization
-
-### 3. Usability
-- Workflow clarity
-- Result accessibility
-- Configuration ease
-
 **Problem:** Analyzing spoken audio, especially conversations with multiple speakers, is time-consuming. **Getting audio from video files requires extra steps.** Manually transcribing, identifying who said what, and finding specific words is inefficient. Furthermore, automated speaker diarization isn't always perfect and can sometimes group speech from multiple speakers into a single segment.
 
 **Solution:** WhisperBite automates this process via a user-friendly web interface (`app.py`) or a command-line tool (`whisperBite.py`). It accepts **audio or video files**, URLs, or folders (processing the newest compatible file within). **For video inputs, it automatically extracts the audio** before performing diarization and transcription.
@@ -136,4 +123,9 @@ WhisperBite addresses the need for sophisticated audio processing in various dom
 *   **Address common diarization inaccuracies with an optional refinement step.**
 *   Generate detailed and usable outputs.
 *   **Allow users to control the verbosity of output (e.g., word extraction, sound detection).**
-*   Offer flexibility through optional processing steps and model choices. 
+*   Offer flexibility through optional processing steps and model choices.
+
+## Recent Regression & Lessons
+- A bug in the VAD output format (tuples vs dicts) broke CLAP, diarization chunking, and all downstream outputs.
+- **Lesson:** All pipeline utility functions must return type-consistent, schema-validated outputs (e.g., dicts with 'start'/'end' keys).
+- Output parity with the legacy implementation is required before further modularization or feature work. 

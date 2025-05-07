@@ -1,6 +1,87 @@
-# System Patterns
+# System Patterns: Modular, Rule-Driven Architecture (2025)
 
 ## Architecture Overview
+
+- **Modular Directory Structure:** Each processing step is a separate file in `modules/`, with a clear interface (input/output/settings).
+- **Core Logic:** Audio object, workflow engine, rules engine, and module registry are in `core/`.
+- **Config and Schema:** Centralized in `config/`.
+- **All I/O and Utility Code:** In `utils/`.
+- **Tests:** In `tests/`, with a focus on regression prevention and module independence.
+
+## Modular Directory Structure
+
+```mermaid
+flowchart TD
+    Main[main.py] --> Core[core/]
+    Main --> Modules[modules/]
+    Main --> Config[config/]
+    Main --> Utils[utils/]
+    Main --> Workflows[workflows/]
+    Main --> Tests[tests/]
+    Core -->|audio_object.py, workflow_engine.py, rules_engine.py, module_registry.py| Core
+    Modules -->|normalization.py, clap.py, segmentation.py, demucs.py, diarization.py, whisper.py, soundbites.py, output_writer.py| Modules
+    Config -->|presets.py, schema.py| Config
+    Utils -->|file_utils.py, audio_utils.py, logging_utils.py| Utils
+    Workflows -->|example_workflow.yaml| Workflows
+    Tests -->|test_workflows.py, test_modules/| Tests
+```
+
+## Path Forward
+- Scaffold the new modular directory and file structure.
+- Migrate each feature/module from the monolith to its own file, with clear interfaces and tests.
+- Implement and validate the CLAP-driven segmentation workflow as the baseline.
+- Expand to more workflows and modules as needed.
+- Plan for LLM-driven orchestration as a future enhancement.
+
+## CLAP-Driven Segmentation Workflow (Baseline)
+
+```mermaid
+flowchart TD
+    Input[Input Audio] --> Normalize[Normalization]
+    Normalize --> CLAP[CLAP Annotation]
+    CLAP --> SegLogic[Segmentation Logic<br>(Speech/Ringing to Hang-up)]
+    SegLogic --> Segments[Audio Segments]
+    Segments --> Whisper[Whisper Transcription]
+    Whisper --> Output[Output Writer]
+```
+
+- **CLAP** detects speech, telephone ringing, and hang-up tones.
+- **Segmentation logic** splits audio at these points.
+- **Each segment** is transcribed by Whisper.
+- This is the **standard workflow to implement and validate first**.
+
+## System Component Relationships
+
+```mermaid
+flowchart TD
+    subgraph Workflow Engine
+        A1[AudioObject] --> A2[Module Registry]
+        A2 --> A3[Rule Engine]
+        A3 --> A4[Workflow Executor]
+        A4 --> A5[Output Writer]
+    end
+    A1 -.-> B1[config.yaml]
+    A5 --> B2[Output Directory<br>+ Metadata]
+```
+
+## Output Directory Structure
+
+```mermaid
+graph TD
+    Root[<output_root>/] --> RunDir("<input_name>_<timestamp>/")
+    RunDir --> Config(config.yaml)
+    RunDir --> Log(processing.log)
+    RunDir --> NormDir(normalized/)
+    RunDir --> DemucsDir(demucs/)
+    RunDir --> SegmentsDir(segments/)
+    RunDir --> SpeakersDir(speakers/)
+    RunDir --> MasterYAML(master_transcript.yaml)
+    RunDir --> MasterTXT(master_transcript.txt)
+```
+
+## Key Patterns
+- Pipeline pattern (modular chaining)
+- Strategy pattern (user-config
 
 ### Modular, User-Driven Workflow Architecture (Planned)
 - All processing steps (input, normalization, Demucs, Pyannote diarization, Whisper transcription, CLAP, soundbite extraction, etc.) are modular and can be chained in any order via a user-driven workflow editor in the UI.
@@ -168,7 +249,9 @@
 - **Pyannote Speaker Diarization (3.1):** Primary method for identifying speaker turns.
 - **Turn Merging Logic (`merge_diarization_turns`):** Merging adjacent turns *from the same speaker* based on `max_silence_gap` to form coherent speaker blocks.
 - **Segment Extraction (`extract_audio_segment`):** Using merged block boundaries to extract corresponding audio segments from the *original normalized* audio using `soundfile` for transcription.
-- **CLAP-based segmentation DEPRECATED.**
+- **CLAP-based segmentation DEPRECATED. CLAP is used for annotation/context only, not for segmentation or cutting.**
+- **Type safety:** All pipeline utility functions must return type-consistent, schema-validated outputs (e.g., dicts with 'start'/'end' keys). Downstream steps must robustly check input types and log errors if mismatches are detected.
+- **Regression testing:** Output format and structure must be validated after every change to prevent silent breakage of downstream steps.
 
 ### 2. Audio Track Management
 - **Original Normalized Audio:** Preserved and used as the source for segment extraction.
@@ -205,56 +288,4 @@
 
 ## Error Handling
 - **Try/Except Blocks:** Used around major processing steps (Normalization, Demucs, Diarization, CLAP, Transcription loop, YAML saving).
-- **Status Updates:** `update_progress` helper logs step completion/errors and updates the main `results` dictionary.
-- **Graceful Degradation:** Contextual CLAP failure is logged but doesn't stop the main transcription process.
-- **Block-Level Errors:** Errors during segment extraction or transcription for a specific block are logged, and processing continues to the next block.
-- **YAML Dumper:** Custom dumper handles potential serialization issues for specific data types.
-
-**Overall Architecture:**
-*   Core processing pipeline (`whisperBite.py::process_audio`).
-*   Gradio web UI (`app.py`) - *Needs testing/potential updates for new workflow*. 
-*   **Pyannote-driven Segmentation Workflow (Implemented).**
-
-**Key Components/Functions:**
-*   `app.py`:
-    *   `build_interface()`: Defines UI.
-    *   `run_pipeline()`: Handles UI logic, calls `whisperBite.process_audio`, passes `progress_callback`.
-*   `whisperBite.py`:
-    *   `process_audio()`: Main orchestrator implementing the Pyannote-first flow described above.
-    *   `extract_audio_from_video()`: Uses `ffmpeg` (called from `main` or `app`).
-    *   `normalize_audio()`: Uses `ffmpeg`.
-    *   `merge_diarization_turns()`: Merges adjacent turns for the same speaker.
-    *   `extract_audio_segment()`: Extracts segment using `soundfile`.
-    *   `format_speaker_label()`: Formats speaker labels.
-    *   `CustomDumper`: Handles YAML serialization for specific types.
-    *   `main()`: Handles CLI execution, preset loading, input path handling, video extraction, calls `process_audio`.
-*   `vocal_separation.py`:
-    *   `separate_vocals_with_demucs()`: Runs Demucs via subprocess.
-*   `event_detection.py`:
-    *   `run_clap_event_detection()`: Used for optional contextual analysis.
-*   `utils.py`:
-    *   Helpers (`sanitize_filename`, `download_audio`, `zip_results`, `get_media_info`).
-
-**Processing Flow (Implemented Pyannote-First):**
-Input -> (`app.py` or `main`) -> Video Check/Extract -> `process_audio` -> Get Media Info -> Normalize -> [Demucs] -> Diarize (Pyannote) -> Merge Turns -> [Contextual CLAP] -> Loop Merged Blocks (Extract Original Segment -> Transcribe Segment w/ Whisper) -> Build Results Dict -> Write `master_transcript.yaml` (Custom Dumper) -> [Zip] -> Cleanup.
-
-**Data Management:**
-*   Unique, timestamped output directory per run.
-*   Handles audio/video inputs, URLs, folders.
-*   **Primary Output:** `master_transcript.yaml`.
-*   Intermediate directories: `normalized/`, `demucs/` (opt), `diarization/`, `segments/`, `events/` (opt).
-*   `config.yaml` and `processing.log` saved per run.
-
-## Modular Pipeline Architecture (Ongoing)
-
-- Demucs runs after normalization (if enabled), producing vocals and no_vocals tracks for downstream use.
-- CLAP Pass 1 segments calls/conversations on normalized track using user prompts.
-- For each call segment:
-    - Diarization (manual speaker count if provided) on vocals track if available, else normalized.
-    - VAD on vocals track if available, else normalized, to refine soundbite boundaries.
-    - Whisper transcription for the full segment (with speaker labels).
-    - After all annotation, cut soundbites using VAD and annotate with speaker/event data, using vocals/no_vocals/remix as per user config.
-- CLAP Pass 2 runs on no_vocals for event annotation (user prompts).
-- CLAP Pass 3 runs on normalized for additional annotation (user prompts).
-- All user options (CLAP prompts, soundbite source, remix volumes) are respected.
-- Architecture is fully modular, extensible, and user-driven. Implementation ongoing.
+- **Status Updates:** `

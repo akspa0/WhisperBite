@@ -455,25 +455,70 @@ def step_clap(context, params):
 
 @register_step('diarization')
 def step_diarization(context, params):
+    import torch
+    import os
+    from pyannote.audio import Pipeline
+    import gc
     hf_token = context['config'].get('hf_token')
     device = context.get('device', 'cpu')
     if isinstance(device, str):
         device = torch.device(device)
-    from pyannote.audio import Pipeline
     diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token).to(device)
     diarization_params = {}
     if params.get('num_speakers') and not params.get('auto_speakers', False):
         diarization_params['num_speakers'] = params['num_speakers']
-    # --- PATCH: Always use Demucs vocals if available ---
+    # Use VAD/CLAP chunks for diarization
+    vad_chunks = context.get('vad_chunks', [])
     vocals_path = context.get('demucs_vocals_path')
     normalized_path = context.get('normalized_audio_path')
     diarization_audio = vocals_path if vocals_path and os.path.exists(vocals_path) else normalized_path
     logger.info(f"[DIARIZATION] Using audio for diarization: {diarization_audio}")
-    diarization_timeline = diarization_pipeline(diarization_audio, **diarization_params)
-    diarization_result = [
-        {"speaker": format_speaker_label(label), "start": turn.start, "end": turn.end}
-        for turn, _, label in diarization_timeline.itertracks(yield_label=True)
-    ]
+    diarization_result = []
+    if vad_chunks:
+        logger.info(f"[DIARIZATION] Running chunked diarization on {len(vad_chunks)} chunks.")
+        for idx, chunk in enumerate(vad_chunks):
+            start = chunk['start']
+            end = chunk['end']
+            logger.info(f"[DIARIZATION] Processing chunk {idx+1}/{len(vad_chunks)}: {start:.2f}-{end:.2f}s")
+            # Extract chunk audio to temp file
+            import tempfile
+            import soundfile as sf
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as tmpf:
+                try:
+                    # Read and write the chunk
+                    with sf.SoundFile(diarization_audio, 'r') as infile:
+                        sr = infile.samplerate
+                        infile.seek(int(start * sr))
+                        frames = int((end - start) * sr)
+                        audio_data = infile.read(frames)
+                        sf.write(tmpf.name, audio_data, sr)
+                    # Run diarization on the chunk
+                    if device.type == 'cuda':
+                        vram_alloc = torch.cuda.memory_allocated(device) / 1024**2
+                        vram_reserved = torch.cuda.memory_reserved(device) / 1024**2
+                        logger.info(f"[VRAM] Before chunk {idx+1}: Allocated={vram_alloc:.1f}MB, Reserved={vram_reserved:.1f}MB")
+                    chunk_timeline = diarization_pipeline(tmpf.name, **diarization_params)
+                    for turn, _, label in chunk_timeline.itertracks(yield_label=True):
+                        diarization_result.append({
+                            "speaker": format_speaker_label(label),
+                            "start": turn.start + start,
+                            "end": turn.end + start
+                        })
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        vram_alloc = torch.cuda.memory_allocated(device) / 1024**2
+                        vram_reserved = torch.cuda.memory_reserved(device) / 1024**2
+                        logger.info(f"[VRAM] After chunk {idx+1}: Allocated={vram_alloc:.1f}MB, Reserved={vram_reserved:.1f}MB")
+                except Exception as e:
+                    logger.error(f"[DIARIZATION] Failed on chunk {idx+1}: {e}")
+    else:
+        logger.info("[DIARIZATION] No vad_chunks found, running diarization on full file.")
+        diarization_timeline = diarization_pipeline(diarization_audio, **diarization_params)
+        diarization_result = [
+            {"speaker": format_speaker_label(label), "start": turn.start, "end": turn.end}
+            for turn, _, label in diarization_timeline.itertracks(yield_label=True)
+        ]
     context['diarization'] = diarization_result
     return context
 
@@ -1538,6 +1583,7 @@ def step_build_conversation_blocks(context, params):
     diarization = context.get('diarization', [])
     vocals_path = context.get('demucs_vocals_path', context.get('normalized_audio_path'))
     output_dir = context.get('output_dir', '.')
+    clap_events = context.get('clap_events', [])
     if not diarization or not vocals_path or not os.path.exists(vocals_path):
         logger.error("[BUILD_BLOCKS] Missing diarization or vocals audio. Cannot build conversation blocks.")
         context['conversation_blocks'] = []
@@ -1568,12 +1614,15 @@ def step_build_conversation_blocks(context, params):
         except Exception as e:
             logger.error(f"[BUILD_BLOCKS] Failed to extract segment {block_id}: {e}")
             continue
+        # Associate CLAP events with this block
+        block_clap_events = [e for e in clap_events if e['start'] < end and e['end'] > start]
         blocks.append({
             'block_id': block_id,
             'start_time': start,
             'end_time': end,
             'speaker': speaker,
-            'segment_audio_path': segment_audio_path
+            'segment_audio_path': segment_audio_path,
+            'clap_events': block_clap_events
         })
     logger.info(f"[BUILD_BLOCKS] Created {len(blocks)} conversation blocks after deduplication/merging.")
     context['conversation_blocks'] = blocks
@@ -1626,7 +1675,9 @@ def step_vad_and_clap_chunking(context, params):
     import soundfile as sf
     from event_detection import run_clap_event_detection
     import numpy as np
+    import yaml
     audio_path = context.get('demucs_vocals_path', context.get('normalized_audio_path'))
+    output_dir = context.get('output_dir', '.')
     if not audio_path or not os.path.exists(audio_path):
         logger.error('[VAD_CLAP_CHUNK] No audio file found for chunking.')
         context['vad_chunks'] = []
@@ -1653,7 +1704,6 @@ def step_vad_and_clap_chunking(context, params):
     device = context.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
     if isinstance(device, str):
         device = torch.device(device)
-    # Load CLAP model and processor
     logger.info(f"[VAD_CLAP_CHUNK] Loading CLAP model {clap_model_id} on {device}...")
     clap_model, clap_processor = load_clap_model_and_processor(clap_model_id, device)
     if not clap_model or not clap_processor:
@@ -1671,6 +1721,7 @@ def step_vad_and_clap_chunking(context, params):
         sr = 48000
     if audio_data.ndim > 1:
         audio_data = audio_data[:, 0]
+    all_clap_events = []
     for chunk in vad_chunks:
         chunk_start, chunk_end = chunk['start'], chunk['end']
         chunk_events = []
@@ -1703,6 +1754,7 @@ def step_vad_and_clap_chunking(context, params):
                         event['start'] += sub_start
                         event['end'] += sub_start
                         chunk_events.append(event)
+                        all_clap_events.append(event)
             except Exception as e:
                 logger.error(f"[VAD_CLAP_CHUNK] CLAP failed on sub-chunk {sub_start:.2f}-{sub_end:.2f}: {e}")
             sub_start += clap_chunk - clap_overlap
@@ -1710,6 +1762,15 @@ def step_vad_and_clap_chunking(context, params):
         chunk['clap_events'] = chunk_events
         logger.info(f"[VAD_CLAP_CHUNK] Chunk {chunk_start:.2f}-{chunk_end:.2f}s: {len(chunk_events)} CLAP events detected.")
     context['vad_chunks'] = vad_chunks
+    context['clap_events'] = all_clap_events
+    # Write CLAP events to disk
+    try:
+        clap_events_path = os.path.join(output_dir, 'clap_events.yaml')
+        with open(clap_events_path, 'w') as f:
+            yaml.safe_dump({'clap_events': all_clap_events}, f)
+        logger.info(f"[VAD_CLAP_CHUNK] Wrote {len(all_clap_events)} CLAP events to {clap_events_path}")
+    except Exception as e:
+        logger.error(f"[VAD_CLAP_CHUNK] Failed to write CLAP events to disk: {e}")
     return context
 
 if __name__ == "__main__":

@@ -1,0 +1,39 @@
+name: CLAP-Driven Segmentation
+steps: []  # Steps are now determined dynamically by rules
+config:
+  annotate_with_clap:
+    target_events:
+      - "telephone ringing"
+      - "speech"
+      - "conversation"
+      - "hang-up tones"
+    threshold: 0.15
+    chunk_duration: 3.0
+    min_gap: 5.0
+  diarize_speakers:
+    min_speakers: 1
+    max_speakers: 3
+  transcribe_with_whisper:
+    model: "large-v3"
+    enable_word_extraction: false
+rules:
+  # If speech or conversation is detected, run the full pipeline
+  speech_steps:
+    - segment_audio
+    - diarize_speakers
+    - transcribe_with_whisper
+    - extract_soundbites
+    - write_outputs
+  # If only ringing or hang-up tones are detected, skip diarization/transcription
+  ringing_steps:
+    - segment_audio
+    - extract_soundbites
+    - write_outputs
+  # If no events are detected, just write outputs (or could error)
+  no_events_steps:
+    - write_outputs
+  # Default fallback
+  default_steps:
+    - segment_audio
+    - write_outputs
+# The rules engine will select the appropriate step list based on CLAP events. 

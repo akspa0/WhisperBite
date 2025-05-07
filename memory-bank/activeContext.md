@@ -1,4 +1,58 @@
-# Active Context: Canonical Workflow & Vision (as of [today's date])
+# Active Context: Modular Refactor (2025)
+
+## Current Focus
+
+- **Complete refactor to a modular, multi-file codebase.**
+    - Each processing step is a separate module/file.
+    - Core logic (audio object, workflow engine, rules engine, registry) is in `core/`.
+    - Config and schema are in `config/`.
+    - Utilities are in `utils/`.
+    - Tests are in `tests/`.
+- **Implement and validate the CLAP-driven segmentation workflow as the baseline.**
+- All audio is represented as objects with full metadata and provenance.
+- All outputs are organized, reproducible, and shareable via `config.yaml`.
+
+## Modular Refactor Checklist
+
+- [ ] Scaffold directory and file structure
+- [ ] Migrate normalization module
+- [ ] Migrate CLAP module
+- [ ] Migrate segmentation logic
+- [ ] Migrate diarization module
+- [ ] Migrate transcription (Whisper) module
+- [ ] Migrate soundbite extraction
+- [ ] Migrate output writer
+- [ ] Implement and validate CLAP-driven segmentation workflow
+- [ ] Write tests for each module and workflow
+- [ ] Document all modules and workflows
+
+## Path Forward
+
+- Scaffold and migrate to a modular, multi-file codebase.
+- Implement and validate the CLAP-driven segmentation workflow.
+- Expand the rules engine/editor for more versatile workflows after baseline validation.
+- Plan for LLM integration as a future enhancement.
+
+## Current Modular Workflow
+
+```mermaid
+flowchart TD
+    Input[Input File/URL/Folder] --> AudioObj[AudioObject Created]
+    AudioObj --> Normalize[Normalization Module]
+    Normalize --> CLAP[CLAP Annotation]
+    CLAP --> SegLogic[Segmentation Logic<br>(Speech/Ringing to Hang-up)]
+    SegLogic --> Segments[Audio Segments]
+    Segments --> Whisper[Whisper Transcription]
+    Whisper --> Output[Output Writer]
+    Output --> Results[config.yaml, YAML, TXT, Audio]
+```
+
+## Next Steps
+1. Finalize and document the module registry and rule engine.
+2. Refactor all processing logic into independent modules.
+3. Update all documentation and memory bank files.
+4. Validate output structure and workflow reproducibility.
+5. Plan for future LLM integration as an optional enhancement.
 
 ## Canonical Workflow
 1. **Input & Normalization**
@@ -26,20 +80,6 @@
 - WhisperBite augments audio with speaker-based transcriptions and contextual hints.
 - Output is designed for accessibility (e.g., for the deaf) and for downstream AI (LLMs, image generation) to reconstruct or illustrate scenes.
 
-## Next Steps
-- Ensure pipeline and workflow YAML route the correct audio to each step.
-- Restore/implement per-speaker segment extraction and transcript rebuilding as in the legacy pipeline.
-- Validate output structure and content against canonical examples.
-
-## Current Focus
-
-**CRITICAL REGRESSION: Modular Refactor Broke Core Output Features**
-
-- As of the latest modular pipeline refactor, **no transcripts are being written at all** (neither per-segment nor master transcript YAML).
-- **CLAP event detection is still non-functional**: no events are detected, regardless of input or settings.
-- **Soundbite extraction is not producing expected outputs**: soundbites are not being cut or transcribed as in the legacy version.
-- The pipeline runs, but the most important outputs (transcripts, soundbites, event segments) are missing or empty.
-
 ## Debugging Steps Taken
 - Restored robust CLAP and soundbite logic from the old version, including model loading, device handling, and segment extraction.
 - Re-implemented `extract_audio_segment` and ensured it is available in `utils.py`.
@@ -51,6 +91,7 @@
 - **No transcripts are being written**: This is a showstopper regression. The pipeline must always produce a master transcript YAML and per-segment TXT files.
 - **CLAP event detection is non-functional**: No events are detected, even on files that worked in the legacy version.
 - **Soundbite extraction is not producing .wav or .txt files**: The output folders are created, but files are missing.
+- **Root cause identified:** The VAD function returned tuples, but downstream code expected dicts with 'start'/'end' keys. This broke CLAP chunking, diarization, and all downstream outputs. **Fix: VAD now returns dicts, restoring type consistency.**
 
 ## Next Steps (Highest Priority)
 1. **Restore transcript writing:** Ensure that the `write_transcripts` step is always called and produces both the master YAML and per-segment TXT files.
@@ -58,9 +99,10 @@
 3. **Restore soundbite extraction and transcription:** Ensure that soundbites are always cut and transcribed, and outputs are written to disk.
 4. **Add regression tests:** Prevent future loss of core output features.
 5. Only after these are fixed: resume modular feature expansion and UI work.
+6. **Validate type consistency:** All pipeline utility functions must return type-consistent, schema-validated outputs (e.g., dicts with 'start'/'end' keys).
 
 ## Summary
-- The modular pipeline refactor has broken the most critical output features of WhisperBite.
+- The modular pipeline refactor broke the most critical output features of WhisperBite due to a type mismatch in VAD output.
 - Immediate focus must be on restoring transcript writing, robust CLAP event detection, and soundbite extraction before any further modularization or UI work.
 - All debugging and development should be directed toward fixing these regressions and validating outputs on known-good test files.
 

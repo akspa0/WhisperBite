@@ -1,48 +1,19 @@
-# Project Brief: WhisperBite (2025 Modular Refactor)
+# Archive: WhisperBite Memory Bank
+
+This file contains all outdated, superseded, or irrelevant content from the core memory bank files, preserved for historical reference. Each section is labeled with its original file and context.
+
+---
+
+## From projectbrief.md
+
+### [2024-05-XX] Original Project Brief (Pre-Modular Refactor)
+<details>
+<summary>Click to expand</summary>
+
+# Project Brief: WhisperBite
 
 ## Purpose
-WhisperBite is a modular audio processing framework for generating richly annotated, accessible, and searchable transcripts from audio or video. It is designed for extensibility, reproducibility, and workflow sharing.
-
-## Core Principles
-- **Modular Architecture:** Each processing step (normalization, CLAP, segmentation, diarization, transcription, etc.) is implemented as a separate, independent module in its own file.
-- **Audio as Objects:** Every audio file (input, intermediate, output) is represented as an object with full metadata and processing history.
-- **Rule-Driven Workflow:** The workflow is defined in YAML, with explicit rules mapping audio annotations (e.g., from CLAP) to workflow steps.
-- **Workflow as Config:** Each run is fully described by a `config.yaml` (sans secrets), enabling reproducibility and sharing.
-- **Extensibility:** New modules, rules, and workflows can be added without breaking existing functionality.
-- **LLM Integration (Future):** The architecture is designed to allow LLM-driven workflow orchestration as an optional enhancement.
-
-## Modular Directory Structure
-
-```mermaid
-flowchart TD
-    Main[main.py] --> Core[core/]
-    Main --> Modules[modules/]
-    Main --> Config[config/]
-    Main --> Utils[utils/]
-    Main --> Workflows[workflows/]
-    Main --> Tests[tests/]
-    Core -->|audio_object.py, workflow_engine.py, rules_engine.py, module_registry.py| Core
-    Modules -->|normalization.py, clap.py, segmentation.py, demucs.py, diarization.py, whisper.py, soundbites.py, output_writer.py| Modules
-    Config -->|presets.py, schema.py| Config
-    Utils -->|file_utils.py, audio_utils.py, logging_utils.py| Utils
-    Workflows -->|example_workflow.yaml| Workflows
-    Tests -->|test_workflows.py, test_modules/| Tests
-```
-
-## Path Forward
-- Scaffold the new modular directory and file structure.
-- Migrate each feature/module from the monolith to its own file, with clear interfaces and tests.
-- Implement and validate the CLAP-driven segmentation workflow as the baseline.
-- Expand to more workflows and modules as needed.
-- Document and share workflows via config files.
-- Plan for LLM-driven orchestration as a future enhancement.
-
-## Project Goals
-1. Provide accurate, reliable, and context-rich audio transcription with speaker and event identification.
-2. Enable flexible, user-driven workflows for diverse use cases.
-3. Maintain high performance, robust error handling, and clear logging.
-4. Ensure all outputs are reproducible, shareable, and well-documented.
-5. Support future enhancements, including LLM-driven orchestration.
+WhisperBite is a tool that augments audio with speaker-based transcriptions and contextual hints. It is designed to make audio content accessible, searchable, and richly detailed for both humans and downstream AI systems.
 
 ## Core Workflow
 - **Demucs**: Separates vocals from the rest of the audio, providing a clean speech track.
@@ -103,3 +74,75 @@ WhisperBite is an advanced audio processing tool that combines speaker diarizati
 3. Maintain high performance and efficient resource usage
 4. Ensure robust error handling and logging
 5. Support extensibility for future enhancements 
+
+</details>
+
+---
+
+## From productContext.md
+
+### [2024-05-XX] Original Product Context (Pre-Modular Refactor)
+<details>
+<summary>Click to expand</summary>
+
+# Product Context: WhisperBite
+
+[...full content of productContext.md...]
+
+</details>
+
+---
+
+## From systemPatterns.md
+
+### [2024-05-XX] Original System Patterns (Pre-Modular Refactor)
+<details>
+<summary>Click to expand</summary>
+
+# System Patterns
+
+[...full content of systemPatterns.md...]
+
+</details>
+
+---
+
+## From techContext.md
+
+### [2024-05-XX] Original Tech Context (Pre-Modular Refactor)
+<details>
+<summary>Click to expand</summary>
+
+# Tech Context
+
+[...full content of techContext.md...]
+
+</details>
+
+---
+
+## From activeContext.md
+
+### [2024-05-XX] Original Active Context (Pre-Modular Refactor)
+<details>
+<summary>Click to expand</summary>
+
+# Active Context: Canonical Workflow & Vision
+
+[...full content of activeContext.md...]
+
+</details>
+
+---
+
+## From progress.md
+
+### [2024-05-XX] Original Progress Status (Pre-Modular Refactor)
+<details>
+<summary>Click to expand</summary>
+
+# Progress Status
+
+[...full content of progress.md...]
+
+</details>
