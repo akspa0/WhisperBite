@@ -1,42 +1,43 @@
-# Tech Context
+# Technical Context
 
-**Core Language:** Python 3
+## Technologies Used
 
-**Key Libraries:**
-*   **`gradio`**: Used by `app.py` to create the web UI.
-*   `openai-whisper`: Core speech-to-text transcription (`whisperBite.py`).
-*   `pyannote.audio`: Speaker diarization (`whisperBite.py`). Requires Hugging Face token.
-*   `torch`: Required backend for Whisper and Pyannote (supports CPU/GPU).
-*   `pydub`: Audio manipulation (`whisperBite.py`).
-*   `argparse`: Command-line argument parsing.
-*   `requests`: For downloading URLs (via `utils.py`).
-*   `yt-dlp`: Used by `utils.download_audio` for URL downloads.
-*   `demucs`: Optional library for vocal separation (installed via pip).
-*   Standard libraries: `logging`, `os`, `sys`, `datetime`, `json`, `subprocess`, `shutil`, `glob`, `tempfile`, `re`.
+- **Core Libraries**:
+  - `pyannote.audio` (version 3.1 or higher) for speaker diarization.
+  - `transformers` (Hugging Face) for CLAP models and **NEW: Whisper speech-to-text models.**
+  - `pydub` or `soundfile` for audio manipulation (though `ffmpeg-python` and `scipy` are also used for some aspects).
+  - `ffmpeg-python` for direct `ffmpeg` bindings used in `audio_utils.py`.
+  - `typer` for the CLI interface.
+- **Models**:
+  - Diarization: `pyannote/speaker-diarization-3.1`.
+  - **NEW: Transcription: `openai/whisper-large-v3` (default).**
+  - Annotation: CLAP models (e.g., `microsoft/clap-htsat-unfused` default).
 
-**External Dependencies (Command Line Tools):**
-*   `ffmpeg`: **Required** for audio normalization and video audio extraction.
-*   `demucs` (command-line): **Implicitly required** if `demucs` Python package is used for vocal separation.
+## Development Setup
 
-**Development Setup:**
-*   Python environment with libraries installed from `requirements.txt`.
-*   `ffmpeg` and optionally `demucs` installed and in PATH.
-*   Internet access for model/audio downloads.
-*   Hugging Face account and API token required for diarization.
+- Python environment (3.8+ recommended).
+- Requires Hugging Face authentication token (`HF_TOKEN`) for Pyannote models and potentially for gated Hugging Face models.
+- GPU (NVIDIA CUDA enabled) strongly recommended for model inference (Pyannote, CLAP, and especially Whisper `large-v3`).
+- `ffmpeg` must be installed and available in the system PATH.
 
-**Execution:**
-*   **Web UI:** `python app.py` (Optional args: `--public`, `--port`).
-*   **CLI:** `python whisperBite.py`.
+## Dependencies
 
-**Hardware:**
-*   CUDA-compatible GPU recommended, CPU supported.
+- Core ML/Audio:
+  - `torch`
+  - `torchaudio`
+  - `pyannote.audio`
+  - `transformers` (ensure it includes sentencepiece for Whisper, e.g., `transformers[torch,sentencepiece]` or similar, `accelerate` is recommended for faster model loading, especially for large models like Whisper).
+  - `ffmpeg-python`
+- Audio Processing Helpers:
+  - `pydub` (currently imported in `diarization.py` and `clap_annotator.py`)
+  - `soundfile` (alternative, not explicitly used yet but good for WAV I/O)
+  - `librosa` (used in `clap_annotator.py` for resampling)
+  - `scipy` (used for `wavfile.write` in `diarization.py`)
+- CLI:
+  - `typer`
 
-**Configuration:**
-*   **Web UI (`app.py`):** Interactive Gradio components.
-*   **CLI (`whisperBite.py`):** `argparse` arguments, including:
-    *   `--enable_word_extraction`: Toggle word audio snippet generation (default: off).
-    *   `--enable_second_pass`: Toggle diarization refinement pass (default: off).
-    *   `--auto_speakers`: Toggle automatic speaker count detection (default: off).
-    *   `--enable_vocal_separation`: Toggle Demucs vocal separation (default: off).
-*   **Speaker Labels:** Output format is `S0`, `S1`, etc.
-*   Some internal parameters in `whisperBite.py` are hardcoded (LUFS target, segment merge gap, word padding, second pass thresholds, sound detection regex). 
+## Key Considerations for Transcription Module
+
+- **Whisper Model Loading:** `openai/whisper-large-v3` can be slow to load and requires significant disk space and VRAM. The `accelerate` library can help with faster loading and better memory management across multiple GPUs if available.
+- **Batch Processing:** For transcribing many small segments, batching (if supported by the `transformers` Whisper pipeline for inference on multiple files) could be more efficient than loading and transcribing one by one. This might be an optimization for later.
+- **Word Timestamp Accuracy:** While generally good, the exact precision of word-level timestamps from Whisper can vary. For critical applications, this might need evaluation. 

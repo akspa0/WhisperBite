@@ -6,7 +6,6 @@ To process an input audio file and produce:
 *   Speaker diarization results (who spoke when) using `pyannote/speaker-diarization-3.1`.
 *   Speaker-separated audio segments based on the diarization.
 *   Timestamps and labels for detected sound events/annotations using a CLAP model.
-*   **NEW:** High-quality transcriptions for each speaker segment and a reconstructed full transcript using `openai/whisper-large-v3`.
 
 This tool is designed to be a focused, modular component whose output can be consumed by other audio processing tools or pipelines.
 
@@ -22,9 +21,6 @@ This tool is designed to be a focused, modular component whose output can be con
     *   **Model Type:** CLAP (Contrastive Language-Audio Pretraining)
     *   **Library:** `transformers` (for loading CLAP models from Hugging Face) or a dedicated CLAP implementation.
     *   **Example CLAP Model:** [microsoft/clap-htsat-unfused](https://huggingface.co/microsoft/clap-htsat-unfused) (or other suitable CLAP models available on Hugging Face).
-*   **NEW: Speech Transcription:**
-    *   **Library:** `transformers` (Hugging Face)
-    *   **Model:** `openai/whisper-large-v3` (or user-specified compatible Whisper model)
 
 ## 3. Inputs
 
@@ -34,7 +30,7 @@ This tool is designed to be a focused, modular component whose output can be con
 *   **Configuration Parameters** (e.g., via CLI arguments or a configuration file like YAML/JSON):
     *   `input_file_path`: (Required) Path to the audio/video file.
     *   `output_dir`: (Required) Directory to save all processing results.
-    *   `hf_token`: (Required for Pyannote, potentially for gated Whisper models if used in future)
+    *   `hf_token`: (Required) Hugging Face User Access Token (for `pyannote/speaker-diarization-3.1` and potentially other gated models). Can be sourced from an environment variable.
     *   **Diarization Settings (for `pyannote/speaker-diarization-3.1`):**
         *   `num_speakers`: (Optional) Integer. Known number of speakers.
         *   `min_speakers`: (Optional) Integer. Minimum number of speakers if `num_speakers` is not set.
@@ -45,12 +41,7 @@ This tool is designed to be a focused, modular component whose output can be con
         *   `clap_event_threshold`: (Optional) Float. Detection threshold for general events (e.g., 0.5).
         *   `clap_sound_prompts`: (Optional) List of strings. Text prompts for specific sound detection (e.g., \["dog barking", "doorbell", "applause"]). If not provided, a default set may be used or this step skipped.
         *   `clap_sound_threshold`: (Optional) Float. Detection threshold for specific sounds (e.g., 0.3).
-    *   **NEW: Transcription Settings:**
-        *   `transcribe`: (Optional) Boolean. Enable/disable transcription. Defaults to `True`.
-        *   `whisper_model_name`: (Optional) String. Hugging Face identifier for the Whisper model. Defaults to "openai/whisper-large-v3".
-        *   `transcription_language`: (Optional) String. Language code for transcription (e.g., "en", "es"). If None, Whisper auto-detects.
-        *   `word_timestamps`: (Optional) Boolean. Enable/disable word-level timestamps in transcription output. Defaults to `True`.
-    *   `device`: (Optional) String. Device for model inference ("cuda" or "cpu") for all models.
+    *   `device`: (Optional) String. Device for model inference ("cuda" or "cpu"). Defaults to "cuda" if available, else "cpu".
     *   `normalize_audio`: (Optional) Boolean. Whether to normalize input audio loudness before processing. Defaults to `True`.
     *   `force_resample_to_16k`: (Optional) Boolean. While `pyannote/speaker-diarization-3.1` handles resampling, this flag could ensure an explicit resampling step to 16kHz mono before any processing, if desired for consistency with other steps like CLAP. Defaults to `True`.
 
@@ -61,7 +52,6 @@ This tool is designed to be a focused, modular component whose output can be con
     *   Load configurations.
     *   Initialize Pyannote diarization pipeline (`Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token)`). Send to `device`.
     *   Initialize CLAP model and processor (e.g., `ClapModel.from_pretrained(clap_model_name)`, `ClapProcessor.from_pretrained(clap_model_name)`). Send to `device`.
-    *   **NEW:** Initialize Whisper model and processor (if transcription enabled).
 2.  **Input Preprocessing (`core/audio_utils.py`):**
     *   Create unique `output_dir` if it doesn\'t exist.
     *   If input is video, extract audio to a temporary WAV file.
@@ -83,21 +73,7 @@ This tool is designed to be a focused, modular component whose output can be con
     *   For each turn (`turn.start`, `turn.end`), extract the corresponding audio segment from `prepared_audio.wav` (e.g., using `pydub` or `soundfile`).
     *   Save each segment to `output_dir/speaker_segments/<speaker_label>/<speaker_label>_turn_<N>.wav`.
     *   Create `speaker_segments.json` listing all segments, their speaker, start/end times, and relative file paths.
-5.  **NEW: Speech Transcription (`core/transcription.py`):** (If `transcribe` is `True`)
-    *   Load `speaker_segments_manifest.json`.
-    *   For each audio segment listed:
-        *   Load the segment WAV file.
-        *   Transcribe using the initialized Whisper model (e.g., `openai/whisper-large-v3`).
-        *   Adjust timestamps to be global (relative to the original input audio start) by adding the segment's original start time.
-        *   Save individual transcription: 
-            *   `output_dir/transcripts/speaker_segments/<speaker_label>/<speaker_label>_turn_<N>.txt` (plain text)
-            *   `output_dir/transcripts/speaker_segments/<speaker_label>/<speaker_label>_turn_<N>.json` (detailed with text, global timestamps, optional word timestamps)
-    *   Collect all individual transcriptions.
-    *   Sort by global start time and reconstruct a full transcript.
-    *   Save full transcript:
-        *   `output_dir/transcripts/full_transcript.json` (list of utterances with speaker, global start/end, text, optional word timestamps)
-        *   `output_dir/transcripts/full_transcript.txt` (human-readable format, e.g., `[HH:MM:SS.mmm --> HH:MM:SS.mmm] SPEAKER_ID: Text`)
-6.  **CLAP Event/Sound Annotation (`core/clap_annotator.py`):**
+5.  **CLAP Event/Sound Annotation (`core/clap_annotator.py`):**
     *   **General Events:** If `clap_event_prompts` are provided:
         *   Process `prepared_audio.wav` with the CLAP model and `clap_event_prompts`.
         *   Filter detections by `clap_event_threshold`.
@@ -106,7 +82,7 @@ This tool is designed to be a focused, modular component whose output can be con
         *   Process `prepared_audio.wav` (or consider processing only non-speech regions if feasible for efficiency, though this adds complexity) with the CLAP model and `clap_sound_prompts`.
         *   Filter detections by `clap_sound_threshold`.
         *   Store results (start, end, label, confidence) in `clap_sounds.json`.
-7.  **Finalization:**
+6.  **Finalization:**
     *   Create the main `manifest.json` (or `results.json`) file summarizing all parameters and output file paths.
     *   Write processing logs to `processing_log.txt`.
 
@@ -137,16 +113,6 @@ This tool is designed to be a focused, modular component whose output can be con
     ]
     ```
 *   `clap_sounds.json`: (If sound prompts provided) Structure similar to `clap_events.json`.
-*   `transcripts/`:
-    *   `speaker_segments/`:
-        *   `SPEAKER_00/`:
-            *   `SPEAKER_00_turn_0.txt`
-            *   `SPEAKER_00_turn_0.json`
-            *   ...
-        *   `SPEAKER_01/`:
-            *   ...
-    *   `full_transcript.json`
-    *   `full_transcript.txt`
 *   `processing_log.txt`: Detailed log of the tool\'s execution.
 *   `results_summary.json`:
     ```json
@@ -190,12 +156,11 @@ AudioSegmenter/
 ├── core/
 │   ├── __init__.py
 │   ├── audio_utils.py       # Audio loading, extraction, normalization, resampling, segmentation
-│   ├── diarization.py       # Renamed from diarization_pyannote.py for simplicity if agreed
+│   ├── diarization_pyannote.py # Pyannote 3.1 diarization logic
 │   ├── annotator_clap.py    # CLAP event/sound annotation logic
-│   ├── transcription.py     # NEW: Whisper transcription logic
 │   └── config_handler.py    # (Optional) For loading/validating config files
 ├── README.md                # Setup, usage, examples
-├── requirements.txt         # e.g., pyannote.audio, torch, torchaudio, transformers, pydub (or soundfile), potentially `accelerate` for faster Whisper loading
+├── requirements.txt         # e.g., pyannote.audio, torch, torchaudio, transformers, pydub (or soundfile)
 └── .gitignore
 ```
 
@@ -206,6 +171,4 @@ AudioSegmenter/
 *   **Error Handling:** Implement try-except blocks for pipeline steps, model loading, and file operations. Log errors clearly.
 *   **Dependencies:** Manage Python dependencies strictly in `requirements.txt`.
 *   **License:** Consider the licenses of all used components (Pyannote.audio: MIT, specific models may vary but `pyannote/speaker-diarization-3.1` is MIT).
-*   **NEW: Whisper Model Size & Performance:** `openai/whisper-large-v3` is large. Document potential for high memory/VRAM usage and slower processing on CPU. Suggest GPU usage. Consider `accelerate` library for faster model loading.
-*   **NEW: Word Timestamps:** Reliability and availability of word timestamps can vary slightly between `transformers` versions or Whisper model implementations. Default to requesting them but note it as potentially optional or best-effort.
-*   **NEW: Transcription Language Detection:** While Whisper auto-detects language, providing a hint via `--transcription-language` can improve accuracy for ambiguous audio or specific needs. 
+

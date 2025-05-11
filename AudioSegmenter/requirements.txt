@@ -1,0 +1,8 @@
+torch>=2.0.0
+torchaudio>=2.0.0
+pyannote.audio[separation]>=3.3.2
+transformers>=4.30.0
+ffmpeg-python>=0.2.0
+librosa>=0.10.0  # For array utilities
+typer>=0.9.0
+python-dotenv>=1.0.0 

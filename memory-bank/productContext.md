@@ -1,29 +1,25 @@
 # Product Context
 
-**Problem:** Analyzing spoken audio, especially conversations with multiple speakers, is time-consuming. **Getting audio from video files requires extra steps.** Manually transcribing, identifying who said what, and finding specific words is inefficient. Furthermore, automated speaker diarization isn't always perfect and can sometimes group speech from multiple speakers into a single segment.
+## Why This Project Exists
 
-**Solution:** WhisperBite automates this process via a user-friendly web interface (`app.py`) or a command-line tool (`whisperBite.py`). It accepts **audio or video files**, URLs, or folders (processing the newest compatible file within). **For video inputs, it automatically extracts the audio** before performing diarization and transcription.
-*   **Refinement:** It includes an **optional second pass** that re-analyzes longer segments from the first pass to detect and separate missed speaker changes, improving accuracy.
-*   **Word Extraction:** It can optionally isolate individual words with their timings and audio snippets, though this feature is **disabled by default** as it generates many files.
-*   **Sound Detection:** If vocal separation is enabled, it can **optionally attempt** to identify non-speech sounds (like music or noise tags from Whisper) in the non-vocal audio track and include them in the master transcript.
+To process an input audio file and produce:
+- Speaker diarization results (who spoke when) using `pyannote/speaker-diarization-3.1`.
+- Speaker-separated audio segments based on the diarization.
+- Timestamps and labels for detected sound events/annotations using a CLAP model.
+- **NEW:** Accurate, speaker-attributed transcriptions of the audio content using Whisper `large-v3`.
 
-**How it Works (User Perspective - Web UI):**
-1.  Launch the Gradio app (`python app.py`).
-2.  Provide source (upload audio/video file, specify folder path [processes newest file], or enter URL).
-3.  Configure options: Whisper model, speaker settings (manual count [default] or auto-detect), vocal separation.
-4.  **Configure advanced options:** Enable second pass refinement? Enable word audio extraction? Enable sound detection (if vocal separation is on)?
-5.  Provide Hugging Face token (for diarization).
-6.  Specify output directory.
-7.  Click "Process Audio". (The app extracts audio from video automatically if needed).
-8.  Status updates appear. If second pass is enabled, this stage will take longer.
-9.  Upon completion, a transcript preview (preferring the refined transcript if second pass was run) is shown, and a download link for the results zip file is provided.
+This tool is designed to be a focused, modular component whose output can be consumed by other audio processing tools or pipelines, providing a comprehensive analysis of audio content.
 
-**User Experience Goals:**
-*   Provide an intuitive web UI for easy configuration and execution.
-*   **Support direct processing of video files by handling audio extraction.**
-*   Offer a fallback command-line interface for advanced use cases.
-*   Automate complex audio processing tasks.
-*   **Address common diarization inaccuracies with an optional refinement step.**
-*   Generate detailed and usable outputs.
-*   **Allow users to control the verbosity of output (e.g., word extraction, sound detection).**
-*   Offer flexibility through optional processing steps and model choices. 
+## Problems It Solves
+
+- Automates speaker diarization, sound event annotation, and **NEW: speech transcription,** significantly reducing manual effort.
+- Provides structured outputs (RTTM, segmented audio, JSON manifests, **NEW: transcription files**) for integration into larger workflows.
+- Handles audio preprocessing (normalization, resampling) to ensure compatibility with models.
+- **NEW:** Enables content searchability and analysis through transcribed text.
+
+## User Experience Goals
+
+- **Ease of Use**: Simple CLI interface with clear configuration options for all processing stages.
+- **Modularity**: Outputs can be easily consumed by other tools.
+- **Performance**: Efficient processing of audio files with minimal setup, with considerations for resource-intensive models like Whisper.
+- **NEW: Accuracy**: Prioritize high-quality outputs for diarization, annotation, and especially transcription. 

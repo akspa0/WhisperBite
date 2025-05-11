@@ -1,40 +1,50 @@
-# Progress
+# Project Progress
 
-**What Works:**
-*   Main processing pipeline (normalization, optional vocal separation, diarization, slicing, transcription).
-*   Gradio Web UI (`app.py`).
-*   Command-line interface (`whisperBite.py`).
-*   Handling of file (audio/video), directory (newest file), and URL inputs.
-*   Automatic audio extraction from video files using `ffmpeg`.
-*   Structured output generation (transcripts, segments, optional word data).
-*   Basic error handling and logging.
-*   Manual speaker count setting (now default).
-*   Optional automatic speaker count detection (disabled by default).
-*   Optional second-pass diarization refinement logic implemented.
-*   Optional word audio extraction (disabled by default).
-*   Optional sound detection using Whisper on non-vocal track (requires vocal separation).
-*   Result zipping.
-*   Correct Demucs execution (using `-n` flag).
-*   Speaker labels formatted as `S0`, `S1`, etc.
-*   Master transcript generation attempts merging first/second pass and sound events.
+## What Works
 
-**What Needs Work/Verification:**
-*   **Master transcript merging:** Ensure second pass correctly replaces, not duplicates, original segments (User noted potential remaining issue). Requires reviewing debug logs added.
-*   **Sound Detection Accuracy:** Evaluate Whisper's effectiveness on `no_vocals` track, especially for specific sounds like phone ringing. Consider dedicated SED models if needed.
-*   Robustness of `detect_optimal_speakers` heuristic (if enabled).
-*   Effectiveness and performance of the `run_second_pass_diarization` refinement (beyond merging bug).
-*   Handling of edge cases (corrupt files, ffmpeg failures, silence, etc.).
-*   Performance optimization for long files.
-*   Configurability of hardcoded parameters (fades, merge gaps, word padding, second pass thresholds, sound detection regex).
-*   Dependency checking (ffmpeg/demucs availability).
-*   Cleanup of temporary directories created by `app.py` for Gradio downloads.
-*   Packaging for deployment (e.g., Pinokio).
+- Project specification and architecture defined in `projectbrief.md` (recently updated for transcription feature).
+- Memory bank documentation initialized and updated for core module refactoring.
+- Initial versions of `core/audio_utils.py`, `core/diarization.py`, `core/clap_annotator.py` are implemented.
+- `audio_utils.py` provides audio loading, normalization (with configurable LUFS), and resampling.
+- `core/diarization.py` refactored to use `pyannote/speaker-diarization-3.1` and performs segmentation as specified.
+- `core/clap_annotator.py` refactored to use `microsoft/clap-htsat-unfused` as default.
+- `audiosegmenter_cli.py` updated to correctly call refactored diarization and normalization, resolving previous import and TypeError issues.
 
-**Current Status:** Core features refined, including Demucs integration, speaker formatting, defaults, and sound detection (basic). Master transcript merging needs verification.
+## What's Left to Build/Refactor
 
-**Known Issues:**
-*   Potential duplication in master transcript when second pass is used (needs log verification).
-*   Sound detection accuracy is dependent on Whisper model and may not be reliable for specific sounds like ringing.
-*   Folder input only processes the newest compatible file.
-*   Potential filename parsing errors in `transcribe_with_whisper` (fallback exists).
-*   Demucs check is basic. 
+- **NEW: Implement Transcription Module (`core/transcription.py`):**
+  - Create `initialize_whisper_model` function to load `openai/whisper-large-v3` (or user-specified) using `transformers`.
+  - Create `transcribe_segment` function to:
+    - Load an audio segment.
+    - Process and transcribe with Whisper, requesting word-level timestamps.
+    - Return structured transcription data (text, relative timestamps).
+  - Add helper functions for saving individual transcriptions (`.txt`, `.json`).
+
+- **NEW: Integrate Transcription into CLI (`audiosegmenter_cli.py`):**
+  - Add CLI options: `--transcribe`, `--whisper-model`, `--transcription-language`, `--word-timestamps`.
+  - In the `process` command:
+    - Initialize Whisper model if transcription is enabled.
+    - After diarization/segmentation, iterate through the speaker segment manifest.
+    - For each segment:
+      - Call `transcribe_segment`.
+      - Adjust timestamps to be global (relative to original audio start).
+      - Save individual transcription files (`output_dir/transcripts/speaker_segments/...`).
+    - Reconstruct and save the full transcript files (`output_dir/transcripts/full_transcript.json` and `.txt`).
+
+- **Finalize Output & Reporting:**
+  - Update `results_summary.json` in `audiosegmenter_cli.py` to include information about transcription outputs (paths, stats like total transcribed duration, etc.).
+  - Ensure all output paths and file structures are consistent with `projectbrief.md`.
+
+- **Testing & Refinement:**
+  - Thoroughly test the complete pipeline: preprocessing -> diarization -> segmentation -> transcription -> CLAP annotation.
+  - Test with various audio files and edge cases.
+  - Refine error handling and logging across all modules.
+
+- **Documentation:**
+  - Update `README.md` with details on the new transcription feature, CLI options, and model requirements (especially for Whisper).
+
+## Known Issues
+
+- (Previous model/logic issues are now resolved by refactoring)
+- **NEW (Potential):** Performance of Whisper `large-v3` on CPU or low-VRAM GPUs needs to be documented as a consideration for users.
+- **NEW (Potential):** Management of Hugging Face model downloads/cache for multiple large models (Pyannote, CLAP, Whisper) should be smooth for the user. 
