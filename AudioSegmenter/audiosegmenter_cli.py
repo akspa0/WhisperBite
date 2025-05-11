@@ -4,14 +4,14 @@ from typing import List, Optional
 import os
 import sys
 import subprocess
-import ffmpeg
-import re
-from pathlib import Path, PureWindowsPath
+import json
+from pathlib import Path
 from core.audio_utils import prepare_audio
 from core.diarization import initialize_diarization_pipeline, run_diarization_and_segmentation
 from core.clap_annotator import annotate_audio
+from core.transcription import initialize_whisper_model, transcribe_segment, save_transcription_files, DEFAULT_WHISPER_MODEL
 
-app = typer.Typer(help="AudioSegmenter: Speaker diarization, separation, and sound annotation tool")
+app = typer.Typer(help="AudioSegmenter: Speaker diarization, transcription, and sound annotation tool")
 
 def check_system_dependencies():
     """Verify system dependencies (FFmpeg)"""
@@ -79,25 +79,30 @@ def process(
     input_path: str = typer.Argument(..., help="Path to input audio/video file"),
     output_dir: str = typer.Argument(..., help="Output directory for results"),
     # Audio preprocessing
-    normalize: bool = typer.Option(True, help="Enable audio normalization"),
+    normalize: bool = typer.Option(True, "--normalize/--no-normalize", help="Enable/disable audio normalization."),
     target_lufs: float = typer.Option(-14.0, help="Target LUFS level for normalization (e.g., -14.0 for YouTube)"),
-    force_resample: bool = typer.Option(True, help="Force resample to 16kHz mono"),
-    # Diarization and Separation
-    hf_token: str = typer.Option(None, help="Hugging Face token (default: HF_TOKEN env var)"),
-    num_speakers: Optional[int] = typer.Option(None, help="Exact speaker count"),
-    min_speakers: int = typer.Option(1, help="Minimum speaker count"),
-    max_speakers: int = typer.Option(5, help="Maximum speaker count"),
+    force_resample: bool = typer.Option(True, "--resample/--no-resample", help="Force/disable resample to 16kHz mono."),
+    # Diarization
+    hf_token: str = typer.Option(None, help="Hugging Face token (default: HF_TOKEN env var). Used for Pyannote and potentially gated HF models."),
+    num_speakers: Optional[int] = typer.Option(None, help="Exact speaker count for diarization."),
+    min_speakers: int = typer.Option(1, help="Minimum speaker count for diarization."),
+    max_speakers: int = typer.Option(5, help="Maximum speaker count for diarization."),
+    # NEW: Transcription options
+    transcribe: bool = typer.Option(True, "--transcribe/--no-transcribe", help="Enable/disable speech transcription."),
+    whisper_model_name: str = typer.Option(DEFAULT_WHISPER_MODEL, help=f"Whisper model name from Hugging Face. Default: {DEFAULT_WHISPER_MODEL}"),
+    transcription_language: Optional[str] = typer.Option(None, help="Language code for transcription (e.g., en, es). Whisper auto-detects if None."),
+    word_timestamps: bool = typer.Option(True, "--word-timestamps/--no-word-timestamps", help="Enable/disable word-level timestamps in transcription."),
     # CLAP annotation
-    clap_model: str = typer.Option("microsoft/clap-htsat-unfused", help="CLAP model name"),
-    device: str = typer.Option("cuda", help="Inference device (cuda/cpu)"),
-    event_prompts: Optional[List[str]] = typer.Option(None, help="Event prompts (comma-separated)"),
-    event_threshold: float = typer.Option(0.5, help="Event detection threshold"),
-    sound_prompts: Optional[List[str]] = typer.Option(None, help="Sound prompts (comma-separated)"), 
-    sound_threshold: float = typer.Option(0.3, help="Sound detection threshold"),
+    clap_model: str = typer.Option("microsoft/clap-htsat-unfused", help="CLAP model name for sound event annotation."),
+    device: str = typer.Option("cuda", help="Inference device (e.g., cuda, cpu, mps). Auto-detects if 'cuda' selected but unavailable."),
+    event_prompts: Optional[List[str]] = typer.Option(None, help="Event prompts for CLAP (comma-separated strings)."),
+    event_threshold: float = typer.Option(0.5, help="Event detection threshold for CLAP."),
+    sound_prompts: Optional[List[str]] = typer.Option(None, help="Sound prompts for CLAP (comma-separated strings)."), 
+    sound_threshold: float = typer.Option(0.3, help="Sound detection threshold for CLAP."),
     # Debug
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output.")
 ):
-    """Process audio file through speaker diarization, separation, and sound event annotation."""
+    """Process an audio file: preprocess, diarize, segment, transcribe, and annotate sound events."""
     # Check dependencies
     check_system_dependencies()
     
@@ -135,7 +140,7 @@ def process(
         force_resample=force_resample
     )
     
-    # 2. Speaker diarization and separation
+    # 2. Speaker diarization and segmentation
     if verbose:
         typer.echo("🔊 Running speaker diarization and segmentation...")
     pipeline = initialize_diarization_pipeline(hf_token)
@@ -155,10 +160,114 @@ def process(
         typer.echo(f"  RTTM file: {diarization_results['rttm_file_path']}")
         typer.echo(f"  Segments manifest: {diarization_results['speaker_segments_manifest']}")
     
-    # 3. Sound annotation (if prompts provided)
+    # 3. NEW: Speech Transcription
+    full_transcript_data = []
+    if transcribe:
+        if verbose: typer.echo("📝 Running speech transcription...")
+        
+        # Determine device for Whisper (can be different from CLAP if needed, but CLI uses one `device` param)
+        # initialize_whisper_model will auto-select cuda if available and device is "cuda"
+        asr_pipeline, _, whisper_device = initialize_whisper_model(model_name=whisper_model_name, device=device, hf_token=hf_token)
+        if verbose: typer.echo(f"Whisper model initialized on device: {whisper_device}")
+
+        speaker_segments_manifest_path = output_dir / diarization_results['speaker_segments_manifest']
+        if not speaker_segments_manifest_path.exists():
+            typer.secho(f"Error: Speaker segments manifest not found: {speaker_segments_manifest_path}", fg=typer.colors.RED)
+            # Decide if to exit or just skip transcription
+        else:
+            with open(speaker_segments_manifest_path, 'r', encoding='utf-8') as f:
+                speaker_segments = json.load(f)
+            
+            transcripts_base_dir = output_dir / "transcripts"
+            transcripts_segments_dir = transcripts_base_dir / "speaker_segments"
+            transcripts_segments_dir.mkdir(parents=True, exist_ok=True)
+
+            for segment_info in speaker_segments:
+                segment_wav_path = output_dir / segment_info["file_path"]
+                if not segment_wav_path.exists():
+                    if verbose: typer.secho(f"Warning: Segment WAV file not found: {segment_wav_path}, skipping transcription.", fg=typer.colors.YELLOW)
+                    continue
+                
+                if verbose: typer.echo(f"Transcribing segment: {segment_wav_path} ({segment_info['speaker_id']} {segment_info['start_time']}-{segment_info['end_time']}) ...")
+                
+                transcription_result = transcribe_segment(
+                    transcribe_pipeline=asr_pipeline,
+                    audio_segment_path=str(segment_wav_path),
+                    language=transcription_language,
+                    return_word_timestamps=word_timestamps
+                )
+                
+                # Determine base path for saving this segment's transcript
+                # e.g. .../transcripts/speaker_segments/SPEAKER_00/SPEAKER_00_turn_0 (no ext)
+                relative_segment_file_path = Path(segment_info["file_path"])
+                # transcripts_segments_dir / SPEAKER_XX / SPEAKER_XX_turn_N (no ext)
+                transcript_base_save_path = transcripts_segments_dir / relative_segment_file_path.parent.name / relative_segment_file_path.stem
+                
+                save_transcription_files(
+                    transcription_result=transcription_result,
+                    base_output_path_no_ext=str(transcript_base_save_path),
+                    global_start_time=segment_info["start_time"] # Pass global start time for timestamp adjustment
+                )
+                
+                # Store for full transcript reconstruction
+                # Ensure text and chunks are present before trying to access them
+                text = transcription_result.get("text", "").strip() # Ensure text is also stripped here
+                word_timestamps_for_full_transcript = [] # Renamed for clarity
+
+                if "chunks" in transcription_result and transcription_result["chunks"]:
+                    word_timestamps_for_full_transcript = [
+                        {
+                            "text": chunk["text"],
+                            "timestamp": ( # Adjust to global time here
+                                round(chunk["timestamp"][0] + segment_info["start_time"], 3),
+                                round(chunk["timestamp"][1] + segment_info["start_time"], 3)
+                            )
+                        }
+                        for chunk in transcription_result["chunks"]
+                    ]
+                elif text: # If no word timestamps, create a single chunk for the segment using its global times
+                    word_timestamps_for_full_transcript = [{
+                        "text": text,
+                        "timestamp": (round(segment_info["start_time"],3), round(segment_info["end_time"],3))
+                    }]
+
+                full_transcript_data.append({
+                    "speaker_id": segment_info["speaker_id"],
+                    "start_time": round(segment_info["start_time"], 3),
+                    "end_time": round(segment_info["end_time"], 3),
+                    "text": text,
+                    "language_detected": transcription_result.get("language_detected"),
+                    # Simpler check: if word_timestamps_for_full_transcript is not empty and its content isn't just the full text
+                    "word_timestamps_available": bool(word_timestamps_for_full_transcript) and \
+                                               not (len(word_timestamps_for_full_transcript) == 1 and word_timestamps_for_full_transcript[0]["text"] == text),
+                    "chunks": word_timestamps_for_full_transcript # Use the globally adjusted chunks
+                })
+            
+            # Sort by start time and save full transcript
+            if full_transcript_data:
+                full_transcript_data.sort(key=lambda x: x["start_time"])
+                full_json_path = transcripts_base_dir / "full_transcript.json"
+                with open(full_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(full_transcript_data, f, indent=2, ensure_ascii=False)
+                if verbose: typer.echo(f"Full transcript JSON saved to: {full_json_path}")
+                
+                full_txt_path = transcripts_base_dir / "full_transcript.txt"
+                with open(full_txt_path, 'w', encoding='utf-8') as f:
+                    for item in full_transcript_data:
+                        start_hms = str(Path(output_dir) / item["start_time"]) # Poor man's sec_to_hms, replace later
+                        end_hms = str(Path(output_dir) / item["end_time"]) # Poor man's sec_to_hms, replace later
+                        # TODO: Convert seconds to HH:MM:SS.mmm format for TXT file
+                        f.write(f"[{item['start_time']:.3f}s --> {item['end_time']:.3f}s] {item['speaker_id']}: {item['text']}\n")
+                if verbose: typer.echo(f"Full transcript TXT saved to: {full_txt_path}")
+            else:
+                if verbose: typer.echo("No segments were transcribed to create a full transcript.")
+    else:
+        if verbose: typer.echo("Transcription disabled via --no-transcribe.")
+
+    # 4. Sound annotation (if prompts provided)
     if event_prompts or sound_prompts:
-        if verbose:
-            typer.echo("🎵 Running sound annotation...")
+        if verbose: typer.echo("🎵 Running sound annotation...")
+        # Note: CLAP annotation should use prepared_audio_path_str for consistency
         annotate_audio(
             audio_path=audio_path,
             output_dir=output_dir,
@@ -170,8 +279,11 @@ def process(
             device=device
         )
     
+    # TODO: 5. Finalization - Update results_summary.json
+    if verbose: typer.echo("📝 Updating results_summary.json (Not yet implemented)")
+
     if verbose:
-        typer.echo(f"✅ Results saved to: {output_dir}")
+        typer.echo(f"✅ Processing complete! Results saved to: {output_dir}")
     typer.secho("Processing complete!", fg=typer.colors.GREEN)
 
 if __name__ == "__main__":
